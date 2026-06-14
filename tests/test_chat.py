@@ -337,6 +337,68 @@ def test_thinking_indicator_animates_then_yields_to_content():
         ThinkingIndicator.update = orig
 
 
+def test_effective_context_meters_against_configured_setting(monkeypatch):
+    # the chat context bar should show used/SETTING (the profile's --max-kv-size),
+    # capped by the model's true max — not always used/model-max.
+    from mlx_launcher.chat.models import Chat
+    from mlx_launcher.screens.chat import ChatScreen
+
+    class Cfg:
+        def __init__(self, max_kv_size):
+            self.id, self.max_kv_size = "s", max_kv_size
+
+    def effective(model, max_kv_size, has_server=True):
+        cs = ChatScreen.__new__(ChatScreen)
+        cs.chat = Chat(model=model, server_id="s" if has_server else None)
+        servers = [Cfg(max_kv_size)] if has_server else []
+
+        class FakeApp:
+            class config:
+                pass
+        FakeApp.config.servers = servers
+        monkeypatch.setattr(ChatScreen, "app", property(lambda self: FakeApp()))
+        return cs._effective_context()
+
+    assert effective("foo-128k", 8192) == 8192        # setting below model max → the setting
+    assert effective("foo-128k", 200000) == 131072    # setting above model max → capped by model
+    assert effective("foo-128k", None) == 131072      # no setting → model max (old behavior)
+    assert effective("mystery-model", 4096) == 4096   # unknown model → the setting alone
+    assert effective("mystery-model", None, has_server=False) is None  # nothing → bar hidden
+
+
+def test_editor_shows_only_engine_relevant_field_groups():
+    import asyncio
+
+    from textual.app import App as TApp
+    from textual.widgets import Select
+
+    from mlx_launcher.screens.editor import EditorScreen, _GROUP_ENGINES
+
+    expected = {
+        "mlx-lm": {"grp-sampling", "grp-shared-adv", "grp-mlxlm-adv"},
+        "mlx-vlm": {"grp-shared-adv", "grp-kvquant", "grp-kv-mlxvlm"},
+        "vllm-mlx": {"grp-kvquant", "grp-vllm"},
+    }
+
+    async def go():
+        class Host(TApp):
+            def on_mount(self):
+                self.push_screen(EditorScreen())
+
+        async with Host().run_test() as pilot:
+            await pilot.pause(0.1)
+            ed = pilot.app.screen
+            for engine, want in expected.items():
+                ed.query_one("#engine", Select).value = engine
+                await pilot.pause(0.05)
+                shown = {g for g in _GROUP_ENGINES if ed.query_one(f"#{g}").display}
+                assert shown == want, f"{engine}: {shown} != {want}"
+                # core fields never hidden
+                assert ed.query_one("#max_tokens").display and ed.query_one("#model").display
+
+    asyncio.run(go())
+
+
 def test_perm_prompt_summaries():
     from mlx_launcher.screens.chat import _perm_prompt
 

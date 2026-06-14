@@ -8,7 +8,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-Engine = Literal["mlx-lm", "mlx-vlm"]
+Engine = Literal["mlx-lm", "mlx-vlm", "vllm-mlx"]
 
 
 def _new_id() -> str:
@@ -25,8 +25,10 @@ class ServerConfig(BaseModel):
     name: str = "Untitled server"
 
     # Which runtime serves the model. mlx-lm for text LLMs (`mlx_lm.server`),
-    # mlx-vlm for vision-language models (`mlx_vlm.server`). The two binaries
-    # accept different flag sets, so this gates how the command line is built.
+    # mlx-vlm for vision-language models (`mlx_vlm.server`), vllm-mlx for a
+    # vLLM-style MLX server (`vllm-mlx serve …`, continuous batching + prefix
+    # cache + KV-quant for text *and* vision). Each binary takes a different
+    # flag set, so this gates how the command line is built.
     engine: Engine = "mlx-lm"
 
     # Core
@@ -53,6 +55,12 @@ class ServerConfig(BaseModel):
     kv_group_size: Optional[int] = None      # group size for uniform quantization (e.g. 64)
     max_kv_size: Optional[int] = None        # cap the KV cache (context) at N tokens
     quantized_kv_start: Optional[int] = None  # token index at which to start quantizing
+
+    # vllm-mlx ONLY (`vllm-mlx serve …`). KV quantization there reuses kv_bits
+    # (4 or 8) / kv_group_size / max_kv_size above.
+    continuous_batching: bool = True         # --continuous-batching (vLLM's batched scheduler)
+    tool_call_parser: Optional[str] = None   # --tool-call-parser (default "auto"); enables native tools
+    reasoning_parser: Optional[str] = None   # --reasoning-parser (e.g. gpt_oss/harmony/qwen3)
 
     # Misc server flags
     trust_remote_code: bool = False

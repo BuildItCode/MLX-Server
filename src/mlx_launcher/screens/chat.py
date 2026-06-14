@@ -465,11 +465,25 @@ class ChatScreen(Screen):
             parts += ["   ", ("● PLAN MODE", "bold #d19a66")]
         self.query_one("#chat-title", Static).update(Content.assemble(*parts))
 
+    def _effective_context(self) -> Optional[int]:
+        """The context budget to meter against: the profile's configured cap
+        (`--max-kv-size`) when set — what the user actually told the server to
+        use — bounded by the model's true max; else the model's max alone."""
+        if not self.chat:
+            return None
+        model_max = capabilities.context_window(self.chat.model)
+        cfg = self._server_by_id(self.chat.server_id) if self.chat.server_id else None
+        setting = cfg.max_kv_size if cfg else None
+        if setting and model_max:
+            return min(setting, model_max)
+        return setting or model_max
+
     def _update_context_bar(self) -> None:
-        """Show how much of the model's context window the conversation uses.
-        Hidden when the context window can't be determined ('if available')."""
+        """Show how much of the configured context the conversation uses (the
+        profile's --max-kv-size if set, else the model's window). Hidden when
+        neither can be determined ('if available')."""
         bar = self.query_one("#context-bar", Static)
-        window = capabilities.context_window(self.chat.model) if self.chat else None
+        window = self._effective_context()
         if not self.chat or not window:
             bar.update("")
             return

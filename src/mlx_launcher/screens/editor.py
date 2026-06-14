@@ -36,6 +36,22 @@ _ENGINE_HINTS = {
         "Vision-language models via mlx_vlm.server. Sampling is per-request; set the "
         "quantized KV cache in Advanced; put --enable-thinking in the Custom tab."
     ),
+    "vllm-mlx": (
+        "vLLM-style MLX server (vllm-mlx serve). Text + vision, continuous batching, "
+        "prefix cache, native tools. KV-quant: set KV bits to 4 or 8 in Advanced."
+    ),
+}
+
+# Which field groups apply to which engine — the rest are hidden so a profile only
+# shows flags the chosen server actually accepts. (Emission is gated in flags.py too;
+# this is purely the UI cutting clutter.)
+_GROUP_ENGINES: dict[str, set[str]] = {
+    "grp-sampling": {"mlx-lm"},                 # server-level sampling defaults
+    "grp-shared-adv": {"mlx-lm", "mlx-vlm"},    # adapter / prefill / log level
+    "grp-mlxlm-adv": {"mlx-lm"},                # prompt cache, draft, templates, concurrency
+    "grp-kvquant": {"mlx-vlm", "vllm-mlx"},     # quantized KV cache (context)
+    "grp-kv-mlxvlm": {"mlx-vlm"},               # mlx-vlm-only KV extras
+    "grp-vllm": {"vllm-mlx"},                   # continuous batching, parsers
 }
 
 
@@ -59,6 +75,7 @@ class EditorScreen(Screen):
                         [
                             ("mlx-lm  ·  text LLMs", "mlx-lm"),
                             ("mlx-vlm  ·  vision-language models", "mlx-vlm"),
+                            ("vllm-mlx  ·  vLLM-style (text + vision, KV-quant)", "vllm-mlx"),
                         ],
                         value="mlx-lm",
                         allow_blank=False,
@@ -77,95 +94,109 @@ class EditorScreen(Screen):
                         with Vertical(classes="col"):
                             yield Label("Port")
                             yield DropPathInput(id="port", value="8080")
-                    with Horizontal(classes="row"):
-                        with Vertical(classes="col"):
-                            yield Label("Temperature")
-                            yield DropPathInput(id="temp", placeholder="0.0")
-                        with Vertical(classes="col"):
-                            yield Label("Max tokens")
-                            yield DropPathInput(id="max_tokens", placeholder="512")
-                    with Horizontal(classes="row"):
-                        with Vertical(classes="col"):
-                            yield Label("top-p")
-                            yield DropPathInput(id="top_p", placeholder="1.0")
-                        with Vertical(classes="col"):
-                            yield Label("top-k")
-                            yield DropPathInput(id="top_k", placeholder="0")
-                    with Horizontal(classes="row"):
-                        with Vertical(classes="col"):
-                            yield Label("min-p")
-                            yield DropPathInput(id="min_p", placeholder="0.0")
-                        with Vertical(classes="col"):
-                            yield Label("")
+                    yield Label("Max tokens")
+                    yield DropPathInput(id="max_tokens", placeholder="512")
+                    with Vertical(id="grp-sampling"):
+                        yield Label("Sampling — mlx-lm", classes="hint")
+                        with Horizontal(classes="row"):
+                            with Vertical(classes="col"):
+                                yield Label("Temperature")
+                                yield DropPathInput(id="temp", placeholder="0.0")
+                            with Vertical(classes="col"):
+                                yield Label("top-p")
+                                yield DropPathInput(id="top_p", placeholder="1.0")
+                        with Horizontal(classes="row"):
+                            with Vertical(classes="col"):
+                                yield Label("top-k")
+                                yield DropPathInput(id="top_k", placeholder="0")
+                            with Vertical(classes="col"):
+                                yield Label("min-p")
+                                yield DropPathInput(id="min_p", placeholder="0.0")
                 with TabPane("Advanced", id="tab-adv"):
-                    yield Label("Adapter path (LoRA)")
-                    yield Input(id="adapter_path")
-                    with Horizontal(classes="row"):
-                        with Vertical(classes="col"):
-                            yield Label("Prompt cache size")
-                            yield Input(id="prompt_cache_size", placeholder="10")
-                        with Vertical(classes="col"):
-                            yield Label("Prompt cache bytes")
-                            yield Input(id="prompt_cache_bytes", placeholder="e.g. 2GB")
-                    yield Label(
-                        "Quantized KV cache — shrinks context memory · mlx-vlm only",
-                        classes="hint",
-                    )
-                    with Horizontal(classes="row"):
-                        with Vertical(classes="col"):
-                            yield Label("KV bits")
-                            yield Input(id="kv_bits", placeholder="off · try 8, 4, or 3.5")
-                        with Vertical(classes="col"):
-                            yield Label("Quant scheme")
-                            yield Input(id="kv_quant_scheme", placeholder="uniform | turboquant")
-                    with Horizontal(classes="row"):
-                        with Vertical(classes="col"):
-                            yield Label("Max KV size (tokens)")
-                            yield Input(id="max_kv_size", placeholder="e.g. 8192")
-                        with Vertical(classes="col"):
-                            yield Label("KV group size")
-                            yield Input(id="kv_group_size", placeholder="64")
-                    yield Label("Quantized KV start (token index)")
-                    yield Input(id="quantized_kv_start", placeholder="e.g. 0")
-                    yield Label("Log level")
-                    yield Select(
-                        [(lvl, lvl) for lvl in _LOG_LEVELS],
-                        value="INFO",
-                        allow_blank=False,
-                        id="log_level",
-                    )
-                    with Horizontal(classes="row"):
-                        with Vertical(classes="col"):
-                            yield Label("Draft model (speculative)")
-                            yield Input(id="draft_model")
-                        with Vertical(classes="col"):
-                            yield Label("Num draft tokens")
-                            yield Input(id="num_draft_tokens", placeholder="3")
-                    yield Label("Allowed origins (CORS)")
-                    yield Input(id="allowed_origins", placeholder="*")
-                    yield Label("Chat template")
-                    yield Input(id="chat_template")
-                    yield Label("Chat template args (JSON)")
-                    yield Input(id="chat_template_args", placeholder='{"enable_thinking": false}')
-                    with Horizontal(classes="row"):
-                        with Vertical(classes="col"):
-                            yield Label("decode concurrency")
-                            yield Input(id="decode_concurrency")
-                        with Vertical(classes="col"):
-                            yield Label("prompt concurrency")
-                            yield Input(id="prompt_concurrency")
-                    yield Label("prefill step size")
-                    yield Input(id="prefill_step_size", placeholder="2048")
+                    with Vertical(id="grp-shared-adv"):
+                        yield Label("Adapter path (LoRA)")
+                        yield Input(id="adapter_path")
+                        yield Label("prefill step size")
+                        yield Input(id="prefill_step_size", placeholder="2048")
+                        yield Label("Log level")
+                        yield Select(
+                            [(lvl, lvl) for lvl in _LOG_LEVELS],
+                            value="INFO",
+                            allow_blank=False,
+                            id="log_level",
+                        )
+                    with Vertical(id="grp-mlxlm-adv"):
+                        yield Label("mlx-lm extras", classes="hint")
+                        with Horizontal(classes="row"):
+                            with Vertical(classes="col"):
+                                yield Label("Prompt cache size")
+                                yield Input(id="prompt_cache_size", placeholder="10")
+                            with Vertical(classes="col"):
+                                yield Label("Prompt cache bytes")
+                                yield Input(id="prompt_cache_bytes", placeholder="e.g. 2GB")
+                        with Horizontal(classes="row"):
+                            with Vertical(classes="col"):
+                                yield Label("Draft model (speculative)")
+                                yield Input(id="draft_model")
+                            with Vertical(classes="col"):
+                                yield Label("Num draft tokens")
+                                yield Input(id="num_draft_tokens", placeholder="3")
+                        yield Label("Allowed origins (CORS)")
+                        yield Input(id="allowed_origins", placeholder="*")
+                        yield Label("Chat template")
+                        yield Input(id="chat_template")
+                        yield Label("Chat template args (JSON)")
+                        yield Input(id="chat_template_args", placeholder='{"enable_thinking": false}')
+                        with Horizontal(classes="row"):
+                            with Vertical(classes="col"):
+                                yield Label("decode concurrency")
+                                yield Input(id="decode_concurrency")
+                            with Vertical(classes="col"):
+                                yield Label("prompt concurrency")
+                                yield Input(id="prompt_concurrency")
+                        with Horizontal(classes="switch-row"):
+                            yield Switch(id="use_default_chat_template")
+                            yield Label("use default chat template")
+                        with Horizontal(classes="switch-row"):
+                            yield Switch(id="pipeline")
+                            yield Label("pipeline (multi-device)")
+                    with Vertical(id="grp-kvquant"):
+                        yield Label(
+                            "Quantized KV cache — shrinks context memory · mlx-vlm (4/8/3.5) "
+                            "or vllm-mlx (4/8)",
+                            classes="hint",
+                        )
+                        with Horizontal(classes="row"):
+                            with Vertical(classes="col"):
+                                yield Label("KV bits")
+                                yield Input(id="kv_bits", placeholder="off · 8, 4, (3.5 mlx-vlm)")
+                            with Vertical(classes="col"):
+                                yield Label("Max KV size (tokens)")
+                                yield Input(id="max_kv_size", placeholder="e.g. 8192")
+                        yield Label("KV group size")
+                        yield Input(id="kv_group_size", placeholder="64")
+                    with Vertical(id="grp-kv-mlxvlm"):
+                        yield Label("mlx-vlm KV extras", classes="hint")
+                        yield Label("Quant scheme")
+                        yield Input(id="kv_quant_scheme", placeholder="uniform | turboquant")
+                        yield Label("Quantized KV start — token index")
+                        yield Input(id="quantized_kv_start", placeholder="e.g. 0")
+                    with Vertical(id="grp-vllm"):
+                        yield Label("vllm-mlx options", classes="hint")
+                        with Horizontal(classes="switch-row"):
+                            yield Switch(id="continuous_batching", value=True)
+                            yield Label("continuous batching")
+                        with Horizontal(classes="row"):
+                            with Vertical(classes="col"):
+                                yield Label("Tool-call parser")
+                                yield Input(id="tool_call_parser", placeholder="auto")
+                            with Vertical(classes="col"):
+                                yield Label("Reasoning parser")
+                                yield Input(id="reasoning_parser", placeholder="gpt_oss | harmony | qwen3")
                     with Horizontal(classes="switch-row"):
                         yield Switch(id="trust_remote_code")
                         yield Label("trust remote code")
-                    with Horizontal(classes="switch-row"):
-                        yield Switch(id="use_default_chat_template")
-                        yield Label("use default chat template")
-                    with Horizontal(classes="switch-row"):
-                        yield Switch(id="pipeline")
-                        yield Label("pipeline (multi-device)")
-                    yield Label("mlx_lm.server path (optional override)")
+                    yield Label("Server binary path (optional override)")
                     yield Input(id="mlx_server_path", placeholder="leave blank to use PATH")
                 with TabPane("Custom", id="tab-custom"):
                     yield Label("Custom params — appended to the command line verbatim.")
@@ -186,12 +217,19 @@ class EditorScreen(Screen):
         if self.server is not None:
             self._populate(self.server)
         self._refresh_engine_hint()
+        self._apply_engine_visibility()
         self._update_preview()
         self.query_one("#name", Input).focus()
 
     def _refresh_engine_hint(self) -> None:
         engine = self.query_one("#engine", Select).value
         self.query_one("#engine-hint", Label).update(_ENGINE_HINTS.get(str(engine), ""))
+
+    def _apply_engine_visibility(self) -> None:
+        """Show only the field groups the selected engine actually uses."""
+        engine = str(self.query_one("#engine", Select).value)
+        for gid, engines in _GROUP_ENGINES.items():
+            self.query_one(f"#{gid}").display = engine in engines
 
     # --- populate / collect ---------------------------------------------
 
@@ -216,6 +254,8 @@ class EditorScreen(Screen):
         text("kv_group_size", s.kv_group_size)
         text("max_kv_size", s.max_kv_size)
         text("quantized_kv_start", s.quantized_kv_start)
+        text("tool_call_parser", s.tool_call_parser)
+        text("reasoning_parser", s.reasoning_parser)
         text("draft_model", s.draft_model)
         text("num_draft_tokens", s.num_draft_tokens)
         text("allowed_origins", s.allowed_origins)
@@ -231,6 +271,7 @@ class EditorScreen(Screen):
         self.query_one("#trust_remote_code", Switch).value = s.trust_remote_code
         self.query_one("#use_default_chat_template", Switch).value = s.use_default_chat_template
         self.query_one("#pipeline", Switch).value = s.pipeline
+        self.query_one("#continuous_batching", Switch).value = s.continuous_batching
 
     def _collect(self) -> ServerConfig:
         def s(i: str) -> str:
@@ -271,19 +312,22 @@ class EditorScreen(Screen):
                 json.loads(cta)
             except json.JSONDecodeError:
                 raise ValueError("chat template args must be valid JSON")
+        engine = self.query_one("#engine", Select).value
         kv_bits = opt_str("kv_bits")
         if kv_bits is not None:
             try:
                 float(kv_bits)
             except ValueError:
                 raise ValueError("KV bits must be a number (e.g. 8, 4, or 3.5)")
+            if engine == "vllm-mlx" and kv_bits not in ("4", "8"):
+                raise ValueError("vllm-mlx KV bits must be 4 or 8")
         kv_scheme = opt_str("kv_quant_scheme")
         if kv_scheme and kv_scheme not in ("uniform", "turboquant"):
             raise ValueError("KV quant scheme must be 'uniform' or 'turboquant'")
 
         kwargs = dict(
             name=name,
-            engine=self.query_one("#engine", Select).value,
+            engine=engine,
             model=model,
             host=s("host") or "127.0.0.1",
             port=port,
@@ -300,6 +344,9 @@ class EditorScreen(Screen):
             kv_group_size=opt_int("kv_group_size"),
             max_kv_size=opt_int("max_kv_size"),
             quantized_kv_start=opt_int("quantized_kv_start"),
+            continuous_batching=sw("continuous_batching"),
+            tool_call_parser=opt_str("tool_call_parser"),
+            reasoning_parser=opt_str("reasoning_parser"),
             log_level=self.query_one("#log_level", Select).value,
             draft_model=opt_str("draft_model"),
             num_draft_tokens=opt_int("num_draft_tokens"),
@@ -365,6 +412,7 @@ class EditorScreen(Screen):
     @on(Select.Changed)
     def _select_changed(self) -> None:
         self._refresh_engine_hint()
+        self._apply_engine_visibility()
         self._update_preview()
 
     @on(Switch.Changed)

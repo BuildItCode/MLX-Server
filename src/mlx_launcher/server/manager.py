@@ -179,6 +179,8 @@ class ServerManager:
             arch = m.group(1) if m else "this model"
             if self.cfg.engine == "mlx-vlm":
                 return f"architecture '{arch}' isn't supported by your mlx-vlm — update it (pip install -U mlx-vlm)"
+            if self.cfg.engine == "vllm-mlx":
+                return f"architecture '{arch}' isn't supported by your vllm-mlx — update it (uv tool upgrade vllm-mlx)"
             return (
                 f"architecture '{arch}' isn't supported by mlx-lm — update it "
                 "(uv tool upgrade mlx-lm), or switch the engine to mlx-vlm if this is a vision model"

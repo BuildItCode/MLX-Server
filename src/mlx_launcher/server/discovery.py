@@ -8,10 +8,12 @@ from typing import Optional
 
 # Each engine ships its own console script. The text-LLM runtime is mlx-lm
 # (`mlx_lm.server`); vision-language models are served by mlx-vlm
-# (`mlx_vlm.server`). Keyed by ServerConfig.engine.
+# (`mlx_vlm.server`); vllm-mlx is a vLLM-style MLX server (`vllm-mlx serve …`).
+# Keyed by ServerConfig.engine.
 SERVER_BINARIES: dict[str, str] = {
     "mlx-lm": "mlx_lm.server",
     "mlx-vlm": "mlx_vlm.server",
+    "vllm-mlx": "vllm-mlx",
 }
 SERVER_BINARY = SERVER_BINARIES["mlx-lm"]  # back-compat default
 

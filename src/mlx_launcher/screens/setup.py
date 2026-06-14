@@ -25,6 +25,7 @@ class SetupScreen(Screen):
             with Horizontal(id="setup-buttons"):
                 yield Button("Install mlx-lm", id="install_mlx", variant="primary")
                 yield Button("Install mlx-vlm", id="install_vlm", variant="primary")
+                yield Button("Install vllm-mlx", id="install_vllm", variant="primary")
                 yield Button("Locate binary", id="locate")
                 yield Button("Install globally", id="install_global", variant="success")
                 yield Button("Back", id="back")
@@ -38,7 +39,7 @@ class SetupScreen(Screen):
     def _refresh_status(self) -> None:
         located = self.app.config.settings.mlx_server_path
         lines = []
-        for engine, binary in (("mlx-lm", "mlx_lm.server"), ("mlx-vlm", "mlx_vlm.server")):
+        for engine, binary in (("mlx-lm", "mlx_lm.server"), ("mlx-vlm", "mlx_vlm.server"), ("vllm-mlx", "vllm-mlx")):
             path = bootstrap.find_mlx_server(engine)
             if path:
                 lines.append(f"[#7fb069]✓ {binary} found[/]  [dim]{escape(path)}[/]")
@@ -64,6 +65,10 @@ class SetupScreen(Screen):
     @on(Button.Pressed, "#install_vlm")
     def _install_vlm(self) -> None:
         self.run_worker(self._run(bootstrap.pip_install_argv("mlx-vlm")), exclusive=True)
+
+    @on(Button.Pressed, "#install_vllm")
+    def _install_vllm(self) -> None:
+        self.run_worker(self._run(bootstrap.pip_install_argv("vllm-mlx")), exclusive=True)
 
     @on(Button.Pressed, "#install_global")
     def _install_global(self) -> None:

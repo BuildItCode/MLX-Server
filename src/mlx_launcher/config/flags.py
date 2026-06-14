@@ -77,8 +77,45 @@ def _tables(engine: str) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
     )
 
 
+def _vllm_mlx_args(cfg: ServerConfig) -> list[str]:
+    """`vllm-mlx serve <model> …` — a subcommand CLI with the model as a positional
+    arg and its own flag names (unlike the `--model`-style mlx servers)."""
+    args: list[str] = ["serve"]
+    if cfg.model:
+        args.append(cfg.model)
+    if cfg.host:
+        args += ["--host", cfg.host]
+    args += ["--port", str(cfg.port)]
+    if cfg.max_tokens:
+        args += ["--max-tokens", str(cfg.max_tokens)]
+    if cfg.max_kv_size:
+        args += ["--max-kv-size", str(cfg.max_kv_size)]
+    # quantized KV cache (context): kv_bits selects the 4- or 8-bit width
+    if cfg.kv_bits and str(cfg.kv_bits).strip():
+        bits = str(cfg.kv_bits).strip().split(".")[0]  # 4 or 8 (vllm-mlx is integer-only)
+        args += ["--kv-cache-quantization", "--kv-cache-quantization-bits", bits]
+        if cfg.kv_group_size:
+            args += ["--kv-cache-quantization-group-size", str(cfg.kv_group_size)]
+    if cfg.continuous_batching:
+        args.append("--continuous-batching")
+    # native tool calling — vllm-mlx ships gpt-oss/harmony parsers; "auto" picks one
+    parser = (cfg.tool_call_parser or "auto").strip()
+    if parser:
+        args += ["--enable-auto-tool-choice", "--tool-call-parser", parser]
+    if cfg.reasoning_parser and cfg.reasoning_parser.strip():
+        args += ["--reasoning-parser", cfg.reasoning_parser.strip()]
+    if cfg.trust_remote_code:
+        args.append("--trust-remote-code")
+    custom = cfg.custom_params.strip()
+    if custom:
+        args += shlex.split(custom)
+    return args
+
+
 def build_args(cfg: ServerConfig) -> list[str]:
     """The flags only (without the binary path)."""
+    if cfg.engine == "vllm-mlx":
+        return _vllm_mlx_args(cfg)
     value_flags, bool_flags = _tables(cfg.engine)
     args: list[str] = []
     for field, flag in value_flags:
@@ -102,7 +139,10 @@ def build_argv(cfg: ServerConfig, mlx_path: str) -> list[str]:
     return [mlx_path, *build_args(cfg)]
 
 
+_DEFAULT_BINARY = {"mlx-vlm": "mlx_vlm.server", "vllm-mlx": "vllm-mlx"}
+
+
 def preview_command(cfg: ServerConfig, mlx_path: str | None = None) -> str:
     """A copy-pasteable, shell-quoted preview of the launch command."""
-    binary = mlx_path or ("mlx_vlm.server" if cfg.engine == "mlx-vlm" else "mlx_lm.server")
+    binary = mlx_path or _DEFAULT_BINARY.get(cfg.engine, "mlx_lm.server")
     return " ".join(shlex.quote(p) for p in build_argv(cfg, binary))

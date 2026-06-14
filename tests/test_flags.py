@@ -91,6 +91,37 @@ def test_kv_cache_quantization_is_mlx_vlm_only():
         assert flag not in lm
 
 
+def test_vllm_mlx_uses_subcommand_positional_model_and_own_flags():
+    # vllm-mlx is `vllm-mlx serve <model> …` — a subcommand with the model as a
+    # POSITIONAL arg (not --model) and its own quantization/parser flag names.
+    c = ServerConfig(
+        engine="vllm-mlx", model="/models/gpt-oss", port=8080, max_tokens=16384,
+        max_kv_size=32768, kv_bits="4", kv_group_size=64, reasoning_parser="gpt_oss",
+        tool_call_parser="auto", continuous_batching=True, trust_remote_code=True,
+    )
+    args = build_args(c)
+    assert args[0] == "serve" and args[1] == "/models/gpt-oss"  # subcommand + positional model
+    assert "--model" not in args                                # NOT the mlx --model style
+    assert args[args.index("--port") + 1] == "8080"
+    assert args[args.index("--max-tokens") + 1] == "16384"
+    assert args[args.index("--max-kv-size") + 1] == "32768"
+    # quantized context: enable flag + integer bit width + group size
+    assert "--kv-cache-quantization" in args
+    assert args[args.index("--kv-cache-quantization-bits") + 1] == "4"
+    assert args[args.index("--kv-cache-quantization-group-size") + 1] == "64"
+    assert "--continuous-batching" in args
+    # native tools on by default (vllm-mlx has gpt-oss/harmony parsers)
+    assert "--enable-auto-tool-choice" in args
+    assert args[args.index("--tool-call-parser") + 1] == "auto"
+    assert args[args.index("--reasoning-parser") + 1] == "gpt_oss"
+    assert "--trust-remote-code" in args
+    # "4.0" normalizes to integer "4" for vllm-mlx's {4,8} choice
+    assert build_args(ServerConfig(engine="vllm-mlx", model="/m", kv_bits="4.0"))[
+        build_args(ServerConfig(engine="vllm-mlx", model="/m", kv_bits="4.0")).index("--kv-cache-quantization-bits") + 1
+    ] == "4"
+
+
 def test_preview_uses_engine_binary():
     assert preview_command(ServerConfig(model="/m")).startswith("mlx_lm.server")
     assert preview_command(ServerConfig(engine="mlx-vlm", model="/m")).startswith("mlx_vlm.server")
+    assert preview_command(ServerConfig(engine="vllm-mlx", model="/m")).startswith("vllm-mlx serve /m")
