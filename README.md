@@ -1,0 +1,56 @@
+# MLX Server Launcher
+
+A Claude-Code-styled terminal app (TUI) to launch and manage local
+[`mlx_lm.server`](https://github.com/ml-explore/mlx-lm) (text LLMs) and
+[`mlx_vlm.server`](https://github.com/Blaizzy/mlx-vlm) (vision-language models)
+instances on Apple Silicon.
+
+- **Pick the engine** per profile: **mlx-lm** for text LLMs, **mlx-vlm** for
+  vision-language models. The launcher emits each engine's correct flags (and routes
+  vlm-only tuning like `--kv-bits` / `--max-kv-size` / `--enable-thinking` through the
+  Custom box).
+- **Drag & drop** a model folder onto the terminal (or paste a HuggingFace repo id).
+- Tweak options (temperature, max-tokens, top-p/k, prompt cache, …) plus a free-form
+  **custom params** box for anything else (e.g. quantized-KV-cache flags on servers that
+  support them).
+- **Launch** the server, see its address (`http://host:port/v1`) and **live logs**.
+- **Save** named server profiles and quick-launch them.
+- Connect to **Xcode 27** two ways: an OpenAI-compatible *Locally Hosted* provider, and
+  an **ACP** (Agent Client Protocol) stdio agent (with agentic file edits).
+- **Chat** with a running server in a built-in Claude-style UI (press `c`): projects +
+  chats sidebar (create/delete with confirmation), streaming replies that render
+  **Markdown with syntax-highlighted, copyable code / JSON blocks**, a thinking panel for
+  reasoning models, a tok/s footer, **drag-and-drop file attachments** (images for vision
+  models, text for any), a multiline prompt (Enter sends · Shift+Enter newline),
+  regenerate / edit-last / export-to-Markdown, and a live **theme picker** (Ctrl+T).
+- **Tool use in chat** (toggle *tools* in the chat): the model can call a built-in
+  **web_search** (DuckDuckGo, no API key) and tools from any **MCP servers** you connect
+  (stdio or SSE) — manage them with `m` on the dashboard or Ctrl+G in chat.
+- **Dependency self-check**: detects missing `mlx_lm.server` / `mlx_vlm.server` and offers
+  to install either (`p` on the dashboard).
+- **Global install**: run it from anywhere like `claude`.
+
+## Quick start
+
+```sh
+./run.sh
+```
+
+First run creates a `.venv` and installs the app's pure-Python deps (Textual, httpx,
+agent-client-protocol, …). It does **not** install the model runtimes itself — the app
+detects your existing `mlx_lm.server` / `mlx_vlm.server` on PATH, or offers to install
+either for you.
+
+## Install globally
+
+```sh
+./install.sh        # uses pipx if available, else ~/.local/bin symlinks
+mlxs                # then launch from anywhere
+```
+
+## Requirements
+
+- macOS on Apple Silicon, Python 3.10–3.14.
+- `mlx-lm` (provides `mlx_lm.server`, for text LLMs) and/or `mlx-vlm` (provides
+  `mlx_vlm.server`, for vision-language models). Install whichever you need — the app can
+  install either for you.
