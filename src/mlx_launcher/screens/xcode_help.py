@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
+from textual.content import Content
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Static
 
@@ -42,29 +42,29 @@ class XcodeHelpScreen(Screen):
         store.upsert_server(self.app.config, self.cfg)
         self.app.save_config()
 
-    def _provider_block(self) -> str:
+    def _provider_block(self) -> Content:
         p = helpers.openai_provider(self.cfg)
-        return (
-            "[b]1 · OpenAI-compatible provider[/]  [dim](works today)[/]\n"
-            "Xcode → Settings → Intelligence → add a model provider → [b]Locally Hosted[/]:\n\n"
-            f"   Base URL   [b]{escape(p.base_url)}[/]\n"
-            f"   API Key    {escape(p.api_key)}   [dim](mlx ignores it; field may be required)[/]\n"
-            f"   Model      [b]{escape(p.model)}[/]\n"
-            f"   Port       {p.port}"
+        return Content.assemble(
+            ("1 · OpenAI-compatible provider", "bold"), ("  (works today)", "dim"), "\n",
+            "Xcode → Settings → Intelligence → add a model provider → ", ("Locally Hosted", "bold"), ":\n\n",
+            "   Base URL   ", (p.base_url, "bold"), "\n",
+            "   API Key    ", p.api_key, ("   (mlx ignores it; field may be required)", "dim"), "\n",
+            "   Model      ", (p.model, "bold"), "\n",
+            "   Port       ", str(p.port),
         )
 
-    def _acp_block(self) -> str:
-        return (
-            "[b]2 · ACP agent[/]  [dim](Xcode 27 beta — verify in Settings → Intelligence)[/]\n"
-            "Register an external agent with this command, or paste the JSON:\n\n"
-            f"   Command   [b]{escape(self.reg.command)}[/]\n"
-            f"   Args      {escape(' '.join(self.reg.args))}\n\n"
-            f"{escape(self.reg.json_block)}\n\n"
-            "[dim]Uses --config-id, so it resolves this profile's URL + model at launch "
-            "(survives port/model edits). Does agentic file edits when Xcode grants "
-            "filesystem access; otherwise streams chat. The MLX server must be running.[/]\n"
-            "[dim]Press c to copy the JSON.[/]\n"
-            f"[dim]Docs: {escape(helpers.XCODE_DOCS_URL)}[/]"
+    def _acp_block(self) -> Content:
+        return Content.assemble(
+            ("2 · ACP agent", "bold"), ("  (Xcode 27 beta — verify in Settings → Intelligence)", "dim"), "\n",
+            "Register an external agent with this command, or paste the JSON:\n\n",
+            "   Command   ", (self.reg.command, "bold"), "\n",
+            "   Args      ", " ".join(self.reg.args), "\n\n",
+            self.reg.json_block, "\n\n",
+            ("Uses --config-id, so it resolves this profile's URL + model at launch "
+             "(survives port/model edits). Does agentic file edits when Xcode grants "
+             "filesystem access; otherwise streams chat. The MLX server must be running.", "dim"), "\n",
+            ("Press c to copy the JSON.", "dim"), "\n",
+            ("Docs: " + helpers.XCODE_DOCS_URL, "dim"),
         )
 
     # --- actions ---------------------------------------------------------
@@ -86,9 +86,8 @@ class XcodeHelpScreen(Screen):
         result.update("[dim]testing GET /v1/models …[/]")
         try:
             models = await fetch_models(self.cfg.base_url())
-            listed = escape(", ".join(models)) if models else "(no models reported)"
-            result.update(f"[#7fb069]✓ /v1/models →[/] {listed}")
+            listed = ", ".join(models) if models else "(no models reported)"
+            result.update(Content.assemble(("✓ /v1/models → ", "#7fb069"), listed))
         except Exception as exc:  # noqa: BLE001
-            result.update(
-                f"[#e06c75]✗ could not reach {escape(self.cfg.base_url())}[/]\n[dim]{escape(str(exc))}[/]"
-            )
+            result.update(Content.assemble(
+                ("✗ could not reach " + self.cfg.base_url(), "#e06c75"), "\n", (str(exc), "dim")))

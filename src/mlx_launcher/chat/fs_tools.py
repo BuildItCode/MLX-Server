@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import signal
 from pathlib import Path
 
 MAX_READ_BYTES = 64_000
@@ -26,6 +27,10 @@ FS_TOOL_NAMES = {
     "delete_path",
     "run_command",
 }
+
+# Tools that change the user's files/system — gated behind a permission prompt.
+# Read-only tools (list_directory, read_file) run without asking.
+MUTATING_TOOLS = {"write_file", "edit_file", "delete_path", "run_command"}
 
 SYSTEM_NOTE = (
     "You have file tools scoped to this project's working directory:\n  {root}\n"
@@ -159,13 +164,18 @@ async def _run_command(root: str, command: str) -> str:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         env=os.environ.copy(),
+        start_new_session=True,  # own process group → kill the whole tree on timeout
     )
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=COMMAND_TIMEOUT)
     except asyncio.TimeoutError:
         try:
-            proc.kill()
-        except ProcessLookupError:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:  # reap so we don't leave a zombie
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
             pass
         return f"command timed out after {int(COMMAND_TIMEOUT)}s"
     text = out.decode("utf-8", errors="replace")

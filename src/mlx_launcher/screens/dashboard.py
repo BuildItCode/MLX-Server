@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from rich.markup import escape
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -12,18 +11,14 @@ from textual.widgets import Footer, Header, Label, ListItem, ListView
 from ..config import store
 from ..config.models import ServerConfig
 from ..widgets.banner import Banner
+from ..widgets.safe_content import title_sub
 
 
 class ServerItem(ListItem):
     def __init__(self, server: ServerConfig) -> None:
         self.server = server
-        running = " [#7fb069]●[/]" if False else ""
-        label = (
-            f"[b]{escape(server.name)}[/]{running}\n"
-            f"[dim]{escape(server.model or '(no model set)')}  ·  {server.host}:{server.port}"
-            f"  ·  {server.engine}[/]"
-        )
-        super().__init__(Label(label))
+        sub = f"{server.model or '(no model set)'}  ·  {server.host}:{server.port}  ·  {server.engine}"
+        super().__init__(Label(title_sub(server.name, sub)))
 
 
 class DashboardScreen(Screen):

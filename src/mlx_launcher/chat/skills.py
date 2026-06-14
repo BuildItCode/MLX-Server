@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -150,7 +151,7 @@ def _fm_value(fm: str, key: str) -> str:
                 else:
                     break
             return " ".join(block).strip()
-        if (val[:1], val[-1:]) in (('"', '"'), ("'", "'")):
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
             return val[1:-1]
         return val
     return ""
@@ -197,7 +198,9 @@ def instructions_for(skill_id: Optional[str]) -> Optional[str]:
 # --- custom skill CRUD ---------------------------------------------------
 
 def _slugify(name: str) -> str:
-    s = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+    # transliterate accents (café → cafe) so non-ASCII names get readable slugs
+    norm = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    s = re.sub(r"[^a-z0-9]+", "-", norm.lower()).strip("-")
     return s or "skill"
 
 

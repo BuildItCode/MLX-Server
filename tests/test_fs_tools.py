@@ -60,6 +60,13 @@ def test_edit_missing_text_and_file(tmp_path):
     asyncio.run(go())
 
 
+def test_mutating_tools_are_the_write_ops():
+    assert fs_tools.MUTATING_TOOLS == {"write_file", "edit_file", "delete_path", "run_command"}
+    assert fs_tools.MUTATING_TOOLS < fs_tools.FS_TOOL_NAMES
+    assert "read_file" not in fs_tools.MUTATING_TOOLS  # read-only ops run without asking
+    assert "list_directory" not in fs_tools.MUTATING_TOOLS
+
+
 def test_system_note_instructs_agents_md(tmp_path):
     root = str(tmp_path)
     note = fs_tools.system_note(root)

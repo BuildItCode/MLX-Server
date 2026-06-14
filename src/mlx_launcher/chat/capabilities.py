@@ -104,9 +104,12 @@ def context_window(model: str) -> int | None:
                         return val
         except (OSError, ValueError, AttributeError):
             pass
-    m = re.search(r"(\d+)\s*k(?![a-z])", _norm(model))  # e.g. "qwen2.5-7b-128k"
+    # a "…-128k…" style hint: digits bounded by non-alnum on both sides, then 'k'
+    m = re.search(r"(?<![a-z0-9])(\d{1,4})\s*k(?![a-z0-9])", _norm(model))  # e.g. "qwen2.5-7b-128k"
     if m:
-        return int(m.group(1)) * 1024
+        win = int(m.group(1)) * 1024
+        if 1024 <= win <= 100_000_000:
+            return win
     return None
 
 

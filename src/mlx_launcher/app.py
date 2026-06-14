@@ -18,8 +18,8 @@ from .theme import MLX_THEME
 
 
 class MlxLauncherApp(App):
-    TITLE = "MLX Server Launcher"
-    SUB_TITLE = "mlx-lm · mlx-vlm · Xcode 27"
+    TITLE = "MLXS"
+    SUB_TITLE = ""
 
     CSS = """
     .section { color: $accent; text-style: bold; padding: 1 1 0 1; }
@@ -117,10 +117,12 @@ class MlxLauncherApp(App):
     #p-instructions { height: 10; border: round $panel; }
     #project-buttons { height: auto; padding: 1 0; }
     #project-buttons Button { margin: 0 1 0 0; }
-    TextPromptModal, ConfirmModal { align: center middle; background: $background 60%; }
+    TextPromptModal, ConfirmModal, PermissionModal { align: center middle; background: $background 60%; }
     #modal-box { width: 64; height: auto; padding: 1 2; border: round $primary; background: $surface; }
     #modal-buttons { height: auto; padding: 1 0 0 0; }
     #modal-buttons Button { margin: 0 1 0 0; }
+    .perm-summary { padding: 1 0 0 0; color: $accent; }
+    .perm-detail { max-height: 12; padding: 1 1 0 1; color: $text-muted; }
 
     .hidden { display: none; }
     """
@@ -152,6 +154,12 @@ class MlxLauncherApp(App):
             self.push_screen(SetupScreen())
 
     # --- config ----------------------------------------------------------
+
+    def notify(self, message: str, **kwargs) -> None:
+        # toast text is arbitrary (names, paths, errors) and may contain markup
+        # chars like `[w=600&h=400]`; never parse it as markup (it would crash).
+        kwargs.setdefault("markup", False)
+        super().notify(message, **kwargs)
 
     def save_config(self) -> None:
         store.save(self.config)

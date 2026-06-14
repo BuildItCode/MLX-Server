@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from rich.markup import escape
+from textual.content import Content
 from textual.widgets import Static
 
 from ..config.models import ServerConfig
@@ -34,4 +35,4 @@ class AddressPanel(Static):
                 f"  health   [dim]{escape(cfg.health_url())}[/]",
             ]
         self.update("\n".join(lines))
-        self.border_title = f" {escape(cfg.name)} "
+        self.border_title = Content(f" {cfg.name} ")  # name may contain markup chars

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from rich.markup import escape
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.content import Content
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Label, ListItem, ListView, Select
 
@@ -16,9 +16,10 @@ from ..chat.models import McpServer
 
 class McpItem(ListItem):
     def __init__(self, server: McpServer) -> None:
-        mark = "[#7fb069]●[/]" if server.enabled else "[dim]○[/]"
+        mark = ("●", "#7fb069") if server.enabled else ("○", "dim")
         detail = server.command if server.transport == "stdio" else server.url
-        super().__init__(Label(f"{mark} [b]{escape(server.name)}[/]  [dim]{server.transport}: {escape(detail or '—')}[/]"))
+        super().__init__(Label(Content.assemble(
+            mark, " ", (server.name, "bold"), "  ", (f"{server.transport}: {detail or '—'}", "dim"))))
         self.server_id = server.id
 
 

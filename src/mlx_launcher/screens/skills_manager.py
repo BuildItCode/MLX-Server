@@ -5,28 +5,30 @@ apart from bundled and BMAD ones."""
 
 from __future__ import annotations
 
-from rich.markup import escape
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
+from textual.content import Content
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Label, ListItem, ListView, RichLog
 
 from ..chat import skills
 
+# (badge text, style) per origin — built as literal Content, never markup
 _BADGE = {
-    skills.ORIGIN_CUSTOM: "[#7fb069]★ custom[/]",
-    skills.ORIGIN_BMAD: "[#d19a66]◆ bmad[/]",
-    skills.ORIGIN_BUNDLED: "[dim]• bundled[/]",
+    skills.ORIGIN_CUSTOM: ("★ custom", "#7fb069"),
+    skills.ORIGIN_BMAD: ("◆ bmad", "#d19a66"),
+    skills.ORIGIN_BUNDLED: ("• bundled", "dim"),
 }
 
 
 class SkillItem(ListItem):
     def __init__(self, skill: skills.Skill) -> None:
-        badge = _BADGE.get(skill.origin, "")
-        desc = (skill.description or "—").strip()
-        super().__init__(Label(f"{badge}  [b]{escape(skill.name)}[/]\n[dim]{escape(desc[:120])}[/]"))
+        badge_text, badge_style = _BADGE.get(skill.origin, ("", ""))
+        desc = (skill.description or "—").strip()[:120]
+        super().__init__(Label(Content.assemble(
+            (badge_text, badge_style), "  ", (skill.name, "bold"), "\n", (desc, "dim"))))
         self.skill = skill
 
 

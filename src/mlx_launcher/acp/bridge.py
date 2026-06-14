@@ -8,6 +8,22 @@ from typing import AsyncIterator, Callable, Optional
 import httpx
 
 
+def _http_error(resp: httpx.Response) -> str:
+    """A concise, useful message from an error response — surface the server's own
+    body (mlx servers put the real reason, e.g. a chat-template error, there)."""
+    detail = ""
+    try:
+        data = resp.json()
+        detail = data.get("detail") or data.get("error") or ""
+        if isinstance(detail, dict):
+            detail = detail.get("message") or json.dumps(detail)
+    except Exception:  # noqa: BLE001 — not JSON
+        detail = (resp.text or "").strip()
+    detail = str(detail).strip().replace("\n", " ")[:400]
+    base = f"server returned HTTP {resp.status_code}"
+    return f"{base}: {detail}" if detail else base
+
+
 async def fetch_models(base_url: str, api_key: str = "not-needed", *, timeout: float = 5.0) -> list[str]:
     """Return the model ids served at `base_url` (`GET /v1/models`)."""
     url = base_url.rstrip("/") + "/models"
@@ -46,7 +62,9 @@ class MlxBridge:
         finish = "stop"
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream("POST", url, json=payload, headers=self._headers) as resp:
-                resp.raise_for_status()
+                if resp.status_code >= 400:
+                    await resp.aread()  # body isn't read yet in streaming mode
+                    raise RuntimeError(_http_error(resp))
                 async for raw in resp.aiter_lines():
                     if cancel is not None and cancel():
                         finish = "cancelled"
@@ -91,5 +109,6 @@ class MlxBridge:
         timeout = httpx.Timeout(connect=10.0, read=read_timeout, write=30.0, pool=10.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=payload, headers=self._headers)
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                raise RuntimeError(_http_error(resp))
             return resp.json()

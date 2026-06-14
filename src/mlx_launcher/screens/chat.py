@@ -39,16 +39,18 @@ from textual.widgets import (
     TextArea,
 )
 
-from ..chat import capabilities, fs_tools, mcp_client, skills, store
+from ..chat import capabilities, fs_tools, mcp_client, prompted_tools, skills, store
 from ..chat import tools as chat_tools
 from ..chat.blocks import split_blocks
-from ..chat.client import ChatClient, build_openai_messages, parse_harmony
+from ..chat.client import ChatClient, build_openai_messages, parse_harmony, prepend_system
 from ..chat.models import Attachment, Chat, ChatMessage, Project
 from ..config.models import ServerConfig
 from ..server import discovery
 from ..server.manager import BinaryNotFound, PortInUse, ServerStatus
 from ..widgets.code_block import CodeBlock
 from ..widgets.path_input import resolve_path
+from ..widgets.safe_content import plain, title_sub
+from textual.content import Content
 
 
 def _candidate_paths(text: str) -> list[str]:
@@ -146,6 +148,59 @@ class ConfirmModal(ModalScreen[bool]):
         self.dismiss(False)
 
 
+def _perm_prompt(name: str, args: dict) -> tuple[str, str]:
+    """A human summary + detail preview for a file/command permission prompt."""
+    if name == "write_file":
+        content = args.get("content", "")
+        return f"Write file  {args.get('path', '?')}  ({len(content)} chars)", content[:500]
+    if name == "edit_file":
+        return (f"Edit file  {args.get('path', '?')}",
+                f"- {args.get('old_text', '')[:200]}\n+ {args.get('new_text', '')[:200]}")
+    if name == "delete_path":
+        return f"Delete  {args.get('path', '?')}", ""
+    if name == "run_command":
+        return "Run command", args.get("command", "")[:500]
+    return name, json.dumps(args)[:500]
+
+
+class PermissionModal(ModalScreen[str]):
+    """Ask the user to allow a mutating file/command operation.
+    Returns 'once' | 'all' | 'deny'."""
+
+    BINDINGS = [Binding("escape", "deny", "Deny")]
+
+    def __init__(self, summary: str, detail: str = "") -> None:
+        super().__init__()
+        self._summary = summary
+        self._detail = detail
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="modal-box"):
+            yield Label("[b]Allow this action?[/]")
+            yield Label(plain(self._summary), classes="perm-summary")
+            if self._detail:
+                yield Static(plain(self._detail), classes="perm-detail")
+            with Horizontal(id="modal-buttons"):
+                yield Button("Approve", id="once", variant="success")
+                yield Button("Approve all", id="all", variant="primary")
+                yield Button("Deny", id="deny", variant="error")
+
+    @on(Button.Pressed, "#once")
+    def _once(self) -> None:
+        self.dismiss("once")
+
+    @on(Button.Pressed, "#all")
+    def _all(self) -> None:
+        self.dismiss("all")
+
+    @on(Button.Pressed, "#deny")
+    def _deny(self) -> None:
+        self.dismiss("deny")
+
+    def action_deny(self) -> None:
+        self.dismiss("deny")
+
+
 class TextPromptModal(ModalScreen[Optional[str]]):
     """A tiny centered text prompt (used for naming projects)."""
 
@@ -181,14 +236,14 @@ class TextPromptModal(ModalScreen[Optional[str]]):
 
 
 class ProjectItem(ListItem):
-    def __init__(self, project_id: Optional[str], label: str) -> None:
+    def __init__(self, project_id: Optional[str], label) -> None:
         super().__init__(Label(label))
         self.project_id = project_id
 
 
 class ChatItem(ListItem):
     def __init__(self, chat: Chat, subtitle: str) -> None:
-        super().__init__(Label(f"[b]{escape(chat.title)}[/]\n[dim]{escape(subtitle or '—')}[/]"))
+        super().__init__(Label(title_sub(chat.title, subtitle or "—")))
         self.chat_id = chat.id
 
 
@@ -215,6 +270,8 @@ class ChatScreen(Screen):
         self._pending: list[Attachment] = []
         self._cancel = False
         self._streaming = False
+        self._auto_approve_fs = False  # "approve all" for file/command ops this session
+        self._prompted_servers: set[str] = set()  # servers whose native tools failed → prompted mode
 
     # --- layout ----------------------------------------------------------
 
@@ -281,26 +338,31 @@ class ChatScreen(Screen):
     # --- sidebar ---------------------------------------------------------
 
     def _refresh_servers(self) -> None:
-        options = [(s.name, s.id) for s in self.app.config.servers]
-        self.query_one("#server-select", Select).set_options(options)
+        options = [(plain(s.name), s.id) for s in self.app.config.servers]  # names may contain markup chars
+        # set_options resets the value (→ a spurious Changed); suppress it
+        with self.prevent(Select.Changed):
+            self.query_one("#server-select", Select).set_options(options)
 
     def _refresh_skills(self) -> None:
         """Populate the skill picker, marking each skill's origin (★ = custom)."""
         marker = {skills.ORIGIN_CUSTOM: "★ ", skills.ORIGIN_BMAD: "◆ ", skills.ORIGIN_BUNDLED: ""}
-        options = [(f"{marker.get(s.origin, '')}{s.name}", s.id) for s in skills.all_skills()]
+        options = [(plain(f"{marker.get(s.origin, '')}{s.name}"), s.id) for s in skills.all_skills()]
         sel = self.query_one("#skill-select", Select)
         keep = self.chat.skill_id if self.chat else None
-        sel.set_options(options)  # resets selection to blank
         ids = {s.id for s in skills.all_skills()}
-        if keep in ids:
-            sel.value = keep
+        # set_options resets the value to blank, firing a spurious Changed that would
+        # wipe the chat's skill_id; suppress Changed while we repopulate and restore.
+        with self.prevent(Select.Changed):
+            sel.set_options(options)
+            if keep in ids:
+                sel.value = keep
 
     def _refresh_projects(self) -> None:
         lv = self.query_one("#projects", ListView)
         lv.clear()
-        lv.append(ProjectItem(None, "All chats"))
+        lv.append(ProjectItem(None, plain("All chats")))
         for p in self.data.projects:
-            lv.append(ProjectItem(p.id, f"▪ {escape(p.name)}"))
+            lv.append(ProjectItem(p.id, Content.assemble("▪ ", p.name)))
 
     def _refresh_chats(self) -> None:
         lv = self.query_one("#chats", ListView)
@@ -372,25 +434,20 @@ class ChatScreen(Screen):
     def _update_topbar(self) -> None:
         if not self.chat:
             return
-        vision = " · ◉ vision" if capabilities.supports_vision(self.chat.model) else ""
-        if not self.chat.server_id and not self.chat.model:
-            name = "[no server]"
-        else:
-            name = self._server_label_for(self.chat)
+        name = "(no server)" if (not self.chat.server_id and not self.chat.model) else self._server_label_for(self.chat)
+        dim = name
+        if capabilities.supports_vision(self.chat.model):
+            dim += " · ◉ vision"
         skill = skills.get_skill(self.chat.skill_id)
-        skill_tag = ""
         if skill:
-            star = "★ " if skill.is_custom else ""
-            skill_tag = f" · ▸ {escape(star + skill.name)}"
+            dim += f" · ▸ {'★ ' if skill.is_custom else ''}{skill.name}"
         proj = self._current_project()
-        cwd_tag = ""
         if proj and proj.working_dir:
-            short = proj.working_dir.replace(os.path.expanduser("~"), "~")
-            cwd_tag = f" · ▣ {escape(short)}"
-        plan_tag = "   [b #d19a66]● PLAN MODE[/]" if self.chat.plan_mode else ""
-        self.query_one("#chat-title", Static).update(
-            f"[b]{escape(self.chat.title)}[/]   [dim]{escape(name)}{vision}{skill_tag}{cwd_tag}[/]{plan_tag}"
-        )
+            dim += " · ▣ " + proj.working_dir.replace(os.path.expanduser("~"), "~")
+        parts: list = [(self.chat.title, "bold"), "   ", (dim, "dim")]
+        if self.chat.plan_mode:
+            parts += ["   ", ("● PLAN MODE", "bold #d19a66")]
+        self.query_one("#chat-title", Static).update(Content.assemble(*parts))
 
     def _update_context_bar(self) -> None:
         """Show how much of the model's context window the conversation uses.
@@ -410,7 +467,8 @@ class ChatScreen(Screen):
     # --- transcript / message widgets -----------------------------------
 
     def _assemble_row(self, label: str, role_class: str, body_widgets: list, *, right: bool = False) -> Horizontal:
-        bubble = Vertical(Label(label, classes="msg-role"), *body_widgets, classes=f"msg {role_class}")
+        role = plain(label) if isinstance(label, str) else label  # names may contain markup chars
+        bubble = Vertical(Label(role, classes="msg-role"), *body_widgets, classes=f"msg {role_class}")
         spacer = Static(classes="msg-spacer")
         children = (spacer, bubble) if right else (bubble, spacer)
         return Horizontal(*children, classes="msg-row")
@@ -439,15 +497,20 @@ class ChatScreen(Screen):
             if m.tps:
                 widgets.append(Static(self._stats_text(m.tps, m.n_tokens or 0, m.elapsed or 0.0), classes="msg-stats"))
             return self._assemble_row(self._server_label_for(self.chat), "msg-assistant", widgets)
-        text = escape(m.text)
-        if m.attachments:
-            chips = "  ".join(f"{escape(a.name or a.path)} ({a.kind})" for a in m.attachments)
-            text = f"{text}\n[dim]{chips}[/]" if text else f"[dim]{chips}[/]"
-        row, _ = self._bubble("You", "msg-user", text or "[dim](empty)[/]", right=True)
+        chips = "  ".join(f"{a.name or a.path} ({a.kind})" for a in m.attachments) if m.attachments else ""
+        if m.text and chips:
+            body = Content.assemble(m.text, "\n", (chips, "dim"))
+        elif m.text:
+            body = plain(m.text)
+        elif chips:
+            body = Content.assemble((chips, "dim"))
+        else:
+            body = plain("(empty)")
+        row, _ = self._bubble("You", "msg-user", body, right=True)
         return row
 
     def _think_widget(self, text: str) -> Horizontal:
-        row, _ = self._bubble("◌ thinking", "msg-think", escape(text))
+        row, _ = self._bubble("◌ thinking", "msg-think", plain(text))
         return row
 
     def _render_transcript(self) -> None:
@@ -694,8 +757,14 @@ class ChatScreen(Screen):
     def _refresh_attachments(self) -> None:
         bar = self.query_one("#attachments", Static)
         if self._pending:
-            chips = "   ".join(f"{escape(a.name)} [dim]({a.kind})[/]" for a in self._pending)
-            bar.update(f"{chips}   [dim]· ctrl+l clears[/]")
+            parts: list = []
+            for a in self._pending:
+                if parts:
+                    parts.append("   ")
+                parts.append(a.name)
+                parts.append((f" ({a.kind})", "dim"))
+            parts.append(("   · ctrl+l clears", "dim"))
+            bar.update(Content.assemble(*parts))
             bar.remove_class("hidden")
         else:
             bar.update("")
@@ -950,6 +1019,23 @@ class ChatScreen(Screen):
         else:
             await self._generate_stream()
 
+    async def _bridge_chat(self, client: ChatClient, messages: list, specs) -> Optional[dict]:
+        """A non-streaming completion that aborts within ~0.1s when the user hits
+        Stop (the raw call blocks for the whole response, so we poll _cancel and
+        cancel the request). Returns the response, or None if cancelled; bridge
+        errors propagate to the caller."""
+        task = asyncio.ensure_future(client.bridge.chat(messages, tools=specs or None))
+        while not task.done():
+            if self._cancel:
+                task.cancel()
+                try:
+                    await task
+                except BaseException:  # noqa: BLE001 — swallow CancelledError / late errors
+                    pass
+                return None
+            await asyncio.sleep(0.1)
+        return task.result()  # re-raises a bridge error for the caller's try/except
+
     async def _generate_stream(self) -> None:
         assert self.chat is not None
         transcript = self.query_one("#transcript", VerticalScroll)
@@ -979,7 +1065,7 @@ class ChatScreen(Screen):
                         if think_body is None:
                             think_box, think_body = self._bubble("◌ thinking", "msg-think", "")
                             await transcript.mount(think_box, before=assistant_box)
-                        think_body.update(escape("".join(reason_acc)))
+                        think_body.update(plain("".join(reason_acc)))
                 elif kind == "content":
                     content_acc.append(chunk)
                     joined = "".join(content_acc)
@@ -1035,7 +1121,8 @@ class ChatScreen(Screen):
         messages = build_openai_messages(self.chat, self._current_project(), self._skill_instructions())
         fs_root = self._fs_root()
         if fs_root:
-            messages.insert(0, {"role": "system", "content": fs_tools.system_note(fs_root)})
+            # ONE leading system message only — see prepend_system (templates 500 on two)
+            prepend_system(messages, fs_tools.system_note(fs_root))
         self._cancel = False
         self._set_generating(True)
         t0 = time.monotonic()
@@ -1058,10 +1145,45 @@ class ChatScreen(Screen):
                         on_error=lambda name, err: self.notify(f"MCP {name}: {err}", severity="warning"),
                     )
                     specs += mcp_specs
+                # native function-calling, falling back to prompted tools (text protocol)
+                # for any model whose template rejects the `tools` param.
+                prompted = (self.chat.server_id or "") in self._prompted_servers
+                if prompted and specs:
+                    prepend_system(messages, prompted_tools.tool_instructions(specs))
                 for _ in range(max_iters):
                     if self._cancel:
                         break
-                    data = await client.bridge.chat(messages, tools=specs)
+                    if prompted:
+                        data = await self._bridge_chat(client, messages, None)
+                        if data is None:  # stopped
+                            break
+                        msg = (data.get("choices") or [{}])[0].get("message") or {}
+                        content, _r = parse_harmony(msg.get("content") or "")
+                        calls = prompted_tools.parse_tool_calls(content) if specs else []
+                        if not calls:
+                            final_text = prompted_tools.strip_tool_calls(content) or content
+                            messages.append({"role": "assistant", "content": content})
+                            break
+                        messages.append({"role": "assistant", "content": content})
+                        for call in calls:
+                            n_calls += 1
+                            result = await self._exec_tool(call["name"], call["arguments"], sessions, router, transcript, fs_root)
+                            messages.append({"role": "user", "content": prompted_tools.tool_response(call["name"], result[:8000])})
+                        self._scroll_end()
+                        continue
+                    try:
+                        data = await self._bridge_chat(client, messages, specs)
+                    except Exception as exc:  # native tools rejected → switch this server to prompted
+                        if specs and not prompted:
+                            prompted = True
+                            self._prompted_servers.add(self.chat.server_id or "")
+                            prepend_system(messages, prompted_tools.tool_instructions(specs))
+                            self.notify("Native tool-calling failed — using prompted tools for this model.",
+                                        severity="warning", timeout=8)
+                            continue
+                        raise
+                    if data is None:  # stopped
+                        break
                     choice = (data.get("choices") or [{}])[0]
                     msg = choice.get("message") or {}
                     tool_calls = msg.get("tool_calls") or []
@@ -1070,17 +1192,22 @@ class ChatScreen(Screen):
                         messages.append({"role": "assistant", "content": content})
                         final_text = content
                         break
-                    messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
+                    messages.append({"role": "assistant", "content": content or None, "tool_calls": tool_calls})
                     for call in tool_calls:
                         n_calls += 1
-                        result = await self._exec_tool(call, sessions, router, transcript, fs_root)
+                        fn = call.get("function") or {}
+                        try:
+                            args = json.loads(fn.get("arguments") or "{}")
+                        except json.JSONDecodeError:
+                            args = {}
+                        result = await self._exec_tool(fn.get("name", ""), args, sessions, router, transcript, fs_root)
                         messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": result[:8000]})
                     self._scroll_end()
         except Exception as exc:  # noqa: BLE001
             final_text = f"▲ {exc}"
 
         elapsed = time.monotonic() - t0
-        widgets = self._assistant_body_widgets(final_text or "(no answer)")
+        widgets = self._assistant_body_widgets(final_text or ("(stopped)" if self._cancel else "(no answer)"))
         plural = "" if n_calls == 1 else "s"
         widgets.append(Static(f"▸ {n_calls} tool call{plural} · {elapsed:.1f}s", classes="msg-stats"))
         await transcript.mount(self._assemble_row(self._server_label_for(self.chat), "msg-assistant", widgets))
@@ -1096,20 +1223,23 @@ class ChatScreen(Screen):
             pass
         self._scroll_end()
 
-    async def _exec_tool(self, call: dict, sessions: dict, router: dict, transcript, fs_root: Optional[str] = None) -> str:
-        fn = call.get("function") or {}
-        name = fn.get("name", "")
-        try:
-            args = json.loads(fn.get("arguments") or "{}")
-        except json.JSONDecodeError:
-            args = {}
-        row, body = self._bubble("▸ tool", "msg-tool", f"[b]{escape(name)}[/]  [dim]{escape(json.dumps(args))[:80]}[/]")
+    async def _exec_tool(self, name: str, args: dict, sessions: dict, router: dict, transcript, fs_root: Optional[str] = None) -> str:
+        row, body = self._bubble("▸ tool", "msg-tool",
+                                 Content.assemble((name, "bold"), "  ", (json.dumps(args)[:80], "dim")))
         await transcript.mount(row)
         self._scroll_end()
         try:
             if name == "web_search":
                 result = await chat_tools.run_web_search(args.get("query", ""), args.get("max_results", 6))
             elif fs_root and name in fs_tools.FS_TOOL_NAMES:
+                if name in fs_tools.MUTATING_TOOLS and not self._auto_approve_fs:
+                    summary, detail = _perm_prompt(name, args)
+                    decision = await self.app.push_screen_wait(PermissionModal(summary, detail))
+                    if decision == "all":
+                        self._auto_approve_fs = True
+                    elif decision != "once":
+                        body.update(Content.assemble((name, "bold"), "\n", ("✕ denied by the user", "#e06c75")))
+                        return "The user DENIED this action. Do not retry it; ask how to proceed."
                 result = await fs_tools.run_fs_tool(fs_root, name, args)
             elif name in router:
                 result = await mcp_client.call_mcp(sessions, router, name, args)
@@ -1118,7 +1248,7 @@ class ChatScreen(Screen):
         except Exception as exc:  # noqa: BLE001
             result = f"tool error: {exc}"
         preview = result if len(result) <= 500 else result[:500] + " …"
-        body.update(f"[b]{escape(name)}[/]\n[dim]{escape(preview)}[/]")
+        body.update(Content.assemble((name, "bold"), "\n", (preview, "dim")))
         return result
 
     def _current_project(self) -> Optional[Project]:

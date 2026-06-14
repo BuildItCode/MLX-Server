@@ -9,6 +9,7 @@ from typing import Optional
 from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.content import Content
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import (
@@ -335,7 +336,7 @@ class EditorScreen(Screen):
             cfg = self._collect()
         except Exception:
             return
-        self.query_one("#cmd-preview", Label).update(f"$ {flags.preview_command(cfg)}")
+        self.query_one("#cmd-preview", Label).update(Content(f"$ {flags.preview_command(cfg)}"))
 
     @on(Button.Pressed, "#save")
     def _on_save(self) -> None:

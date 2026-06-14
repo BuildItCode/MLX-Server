@@ -78,6 +78,7 @@ class HarmonyParser:
         "<|start|>", "<|end|>", "<|message|>", "<|channel|>",
         "<|constrain|>", "<|return|>", "<|call|>",
     )
+    _ROLE = "\x00role"  # sentinel: a message header's body (echoed role turn) → dropped
 
     def __init__(self) -> None:
         self.pending = ""
@@ -112,8 +113,12 @@ class HarmonyParser:
         if not text:
             return
         if self.mode == "body":
-            kind = "content" if self.channel in (None, "final") else "reason"
-            out.append((kind, text))
+            if self.channel in (None, "final"):
+                out.append(("content", text))  # None = pre-Harmony passthrough (normal models)
+            elif self.channel == self._ROLE:
+                pass  # echoed system/user/assistant header turn — drop it
+            else:
+                out.append(("reason", text))  # analysis / commentary
         elif self.mode == "channel":
             self._meta += text  # building up the channel name
 
@@ -130,7 +135,7 @@ class HarmonyParser:
             self.mode = "constrain"
         elif tok == "<|start|>":
             self.mode = "role"
-            self.channel = None
+            self.channel = self._ROLE  # body before an explicit channel is a role echo
         else:  # <|end|> / <|return|> / <|call|>
             self.mode = "none"
             self.channel = None
@@ -196,6 +201,20 @@ PLAN_MODE_INSTRUCTIONS = (
     "- END by asking the user to approve the plan or tell you what to change. Do NOT begin "
     "implementing until the user explicitly approves."
 )
+
+
+def prepend_system(messages: list[dict], note: str) -> list[dict]:
+    """Fold `note` into the system prompt as ONE leading system message — merging
+    into an existing system message rather than adding a second one. Many chat
+    templates (e.g. Qwen) raise "System message must be at the beginning" — a 500
+    from mlx_lm.server — when given two leading system turns, so we never emit two."""
+    if not note:
+        return messages
+    if messages and messages[0].get("role") == "system":
+        messages[0] = {**messages[0], "content": f"{note}\n\n---\n\n{messages[0]['content']}"}
+    else:
+        messages.insert(0, {"role": "system", "content": note})
+    return messages
 
 
 def build_openai_messages(

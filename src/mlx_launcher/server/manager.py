@@ -144,13 +144,23 @@ class ServerManager:
             self._emit_log(name, line.decode(errors="replace").rstrip("\n"))
 
     async def _wait_ready(self) -> None:
-        ok = await wait_until_ready(
-            self.cfg.server_url(),
-            timeout=self._ready_timeout,
-            should_continue=lambda: self.is_running and not self._stopping,
-        )
-        if ok and self.status == ServerStatus.STARTING:
-            self._set_status(ServerStatus.READY, "server is ready")
+        # Keep probing as long as the process is alive: a large model can take
+        # longer than one timeout window to load, and we must not leave the UI
+        # stuck on STARTING forever when the probe window elapses.
+        while self.is_running and not self._stopping and self.status == ServerStatus.STARTING:
+            ok = await wait_until_ready(
+                self.cfg.server_url(),
+                timeout=self._ready_timeout,
+                should_continue=lambda: self.is_running and not self._stopping,
+            )
+            if ok:
+                if self.status == ServerStatus.STARTING:
+                    self._set_status(ServerStatus.READY, "server is ready")
+                return
+            if not self.is_running or self._stopping:
+                return
+            # timed out but the process is still alive → keep waiting, but say so
+            self._set_status(ServerStatus.STARTING, "still loading — readiness probe hasn't answered yet")
 
     async def _watch_exit(self) -> None:
         assert self.proc is not None
