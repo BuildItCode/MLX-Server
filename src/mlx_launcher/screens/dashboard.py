@@ -36,6 +36,7 @@ class DashboardScreen(Screen):
         Binding("x", "xcode", "Xcode"),
         Binding("t", "theme", "Theme"),
         Binding("m", "mcp", "MCP servers"),
+        Binding("k", "skills", "Skills"),
         Binding("p", "deps", "Dependencies"),
         Binding("g", "global_install", "Install globally"),
         Binding("q", "quit", "Quit"),
@@ -130,6 +131,11 @@ class DashboardScreen(Screen):
         from .mcp_manager import McpManagerScreen
 
         self.app.push_screen(McpManagerScreen())
+
+    def action_skills(self) -> None:
+        from .skills_manager import SkillsManagerScreen
+
+        self.app.push_screen(SkillsManagerScreen())
 
     def action_deps(self) -> None:
         from .setup import SetupScreen

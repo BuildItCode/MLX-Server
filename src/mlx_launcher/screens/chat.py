@@ -8,6 +8,7 @@ Shift+Enter / Ctrl+J for a newline), plus regenerate / edit-last / export."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -38,12 +39,14 @@ from textual.widgets import (
     TextArea,
 )
 
-from ..chat import capabilities, mcp_client, store
+from ..chat import capabilities, fs_tools, mcp_client, skills, store
 from ..chat import tools as chat_tools
 from ..chat.blocks import split_blocks
-from ..chat.client import ChatClient, build_openai_messages
+from ..chat.client import ChatClient, build_openai_messages, parse_harmony
 from ..chat.models import Attachment, Chat, ChatMessage, Project
 from ..config.models import ServerConfig
+from ..server import discovery
+from ..server.manager import BinaryNotFound, PortInUse, ServerStatus
 from ..widgets.code_block import CodeBlock
 from ..widgets.path_input import resolve_path
 
@@ -64,6 +67,21 @@ def _candidate_paths(text: str) -> list[str]:
         if os.path.isabs(p) and os.path.isfile(p):
             paths.append(p)
     return paths
+
+
+def _fmt_k(n: int) -> str:
+    if n < 1000:
+        return str(n)
+    return f"{n / 1000:.1f}k".replace(".0k", "k")
+
+
+def _context_bar_markup(used: int, window: int, width: int = 10) -> str:
+    frac = max(0.0, min(1.0, used / window)) if window else 0.0
+    filled = round(frac * width)
+    pct = int(round(frac * 100))
+    color = "#7fb069" if frac < 0.7 else "#d19a66" if frac < 0.9 else "#e06c75"
+    bar = f"[{color}]" + "█" * filled + "[/][dim]" + "░" * (width - filled) + "[/]"
+    return f"[dim]ctx[/] {bar} [dim]{_fmt_k(used)}/{_fmt_k(window)} · {pct}%[/]"
 
 
 class PromptArea(TextArea):
@@ -104,15 +122,16 @@ class PromptArea(TextArea):
 class ConfirmModal(ModalScreen[bool]):
     BINDINGS = [Binding("escape", "no", "No")]
 
-    def __init__(self, prompt: str) -> None:
+    def __init__(self, prompt: str, confirm_label: str = "OK") -> None:
         super().__init__()
         self._prompt = prompt
+        self._confirm_label = confirm_label
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal-box"):
             yield Label(self._prompt)
             with Horizontal(id="modal-buttons"):
-                yield Button("Delete", id="yes", variant="error")
+                yield Button(self._confirm_label, id="yes", variant="error")
                 yield Button("Cancel", id="no", variant="primary")
 
     @on(Button.Pressed, "#yes")
@@ -182,6 +201,8 @@ class ChatScreen(Screen):
         Binding("ctrl+r", "regenerate", "Regenerate"),
         Binding("ctrl+t", "theme", "Theme"),
         Binding("ctrl+g", "mcp", "MCP servers"),
+        Binding("ctrl+k", "skills", "Skills"),
+        Binding("ctrl+e", "edit_project", "Edit project"),
         Binding("d", "delete", "Delete"),
     ]
 
@@ -212,10 +233,14 @@ class ChatScreen(Screen):
             with Vertical(id="chat-main"):
                 with Horizontal(id="chat-topbar"):
                     yield Static("", id="chat-title")
+                    yield Select([], id="skill-select", prompt="skill", allow_blank=True)
                     yield Select([], id="server-select", prompt="server", allow_blank=True)
                 yield VerticalScroll(id="transcript")
                 with Horizontal(id="chat-toggles"):
+                    yield Static("", id="context-bar", classes="ctx-bar")
                     yield Static(classes="actions-spacer")
+                    yield Label("plan", id="plan-label", classes="toggle-label")
+                    yield Switch(id="plan")
                     yield Label("reason", id="reason-label", classes="toggle-label")
                     yield Switch(id="reasoning")
                     yield Label("web", id="web-label", classes="toggle-label")
@@ -230,13 +255,14 @@ class ChatScreen(Screen):
                 yield Input(id="attach", placeholder="paste a file path, Enter to attach", classes="hidden")
                 with Horizontal(id="chat-inputrow"):
                     yield PromptArea(id="prompt", soft_wrap=True)
-                    yield Button("⊕", id="attach-btn")
+                    yield Button("+ Attach", id="attach-btn")
                     yield Button("Send", id="send", variant="primary")
         yield Footer()
 
     def on_mount(self) -> None:
         self.query_one("#prompt", PromptArea).border_title = "Enter to send · Shift+Enter for newline"
         self._refresh_servers()
+        self._refresh_skills()
         self._refresh_projects()
         self._refresh_chats()
         if self._initial_server:
@@ -257,6 +283,17 @@ class ChatScreen(Screen):
     def _refresh_servers(self) -> None:
         options = [(s.name, s.id) for s in self.app.config.servers]
         self.query_one("#server-select", Select).set_options(options)
+
+    def _refresh_skills(self) -> None:
+        """Populate the skill picker, marking each skill's origin (★ = custom)."""
+        marker = {skills.ORIGIN_CUSTOM: "★ ", skills.ORIGIN_BMAD: "◆ ", skills.ORIGIN_BUNDLED: ""}
+        options = [(f"{marker.get(s.origin, '')}{s.name}", s.id) for s in skills.all_skills()]
+        sel = self.query_one("#skill-select", Select)
+        keep = self.chat.skill_id if self.chat else None
+        sel.set_options(options)  # resets selection to blank
+        ids = {s.id for s in skills.all_skills()}
+        if keep in ids:
+            sel.value = keep
 
     def _refresh_projects(self) -> None:
         lv = self.query_one("#projects", ListView)
@@ -313,11 +350,16 @@ class ChatScreen(Screen):
         self._refresh_attachments()
         select = self.query_one("#server-select", Select)
         ids = [s.id for s in self.app.config.servers]
-        select.value = chat.server_id if chat.server_id in ids else Select.BLANK
+        select.value = chat.server_id if chat.server_id in ids else Select.NULL
+        skill_sel = self.query_one("#skill-select", Select)
+        skill_ids = {s.id for s in skills.all_skills()}
+        skill_sel.value = chat.skill_id if chat.skill_id in skill_ids else Select.NULL
         self._sync_reasoning_switch()
         self.query_one("#web", Switch).value = bool(self.chat and self.chat.web_search)
         self.query_one("#tools", Switch).value = bool(self.chat and self.chat.tools)
+        self.query_one("#plan", Switch).value = bool(self.chat and self.chat.plan_mode)
         self._update_topbar()
+        self._update_context_bar()
         self._render_transcript()
         self.query_one("#prompt", PromptArea).focus()
 
@@ -335,9 +377,35 @@ class ChatScreen(Screen):
             name = "[no server]"
         else:
             name = self._server_label_for(self.chat)
+        skill = skills.get_skill(self.chat.skill_id)
+        skill_tag = ""
+        if skill:
+            star = "★ " if skill.is_custom else ""
+            skill_tag = f" · ▸ {escape(star + skill.name)}"
+        proj = self._current_project()
+        cwd_tag = ""
+        if proj and proj.working_dir:
+            short = proj.working_dir.replace(os.path.expanduser("~"), "~")
+            cwd_tag = f" · ▣ {escape(short)}"
+        plan_tag = "   [b #d19a66]● PLAN MODE[/]" if self.chat.plan_mode else ""
         self.query_one("#chat-title", Static).update(
-            f"[b]{escape(self.chat.title)}[/]   [dim]{escape(name)}{vision}[/]"
+            f"[b]{escape(self.chat.title)}[/]   [dim]{escape(name)}{vision}{skill_tag}{cwd_tag}[/]{plan_tag}"
         )
+
+    def _update_context_bar(self) -> None:
+        """Show how much of the model's context window the conversation uses.
+        Hidden when the context window can't be determined ('if available')."""
+        bar = self.query_one("#context-bar", Static)
+        window = capabilities.context_window(self.chat.model) if self.chat else None
+        if not self.chat or not window:
+            bar.update("")
+            return
+        messages = build_openai_messages(self.chat, self._current_project(), self._skill_instructions())
+        used = capabilities.estimate_prompt_tokens(messages)
+        fs = self._fs_root()
+        if fs:
+            used += capabilities.approx_tokens(fs_tools.system_note(fs))
+        bar.update(_context_bar_markup(used, window))
 
     # --- transcript / message widgets -----------------------------------
 
@@ -373,7 +441,7 @@ class ChatScreen(Screen):
             return self._assemble_row(self._server_label_for(self.chat), "msg-assistant", widgets)
         text = escape(m.text)
         if m.attachments:
-            chips = "  ".join(f"⊕ {escape(a.name or a.path)}" for a in m.attachments)
+            chips = "  ".join(f"{escape(a.name or a.path)} ({a.kind})" for a in m.attachments)
             text = f"{text}\n[dim]{chips}[/]" if text else f"[dim]{chips}[/]"
         row, _ = self._bubble("You", "msg-user", text or "[dim](empty)[/]", right=True)
         return row
@@ -415,18 +483,106 @@ class ChatScreen(Screen):
 
     @on(Select.Changed, "#server-select")
     def _server_changed(self, event: Select.Changed) -> None:
-        if not self.chat or event.value is Select.BLANK:
+        # event.value == current → programmatic sync, re-select, or a revert: ignore.
+        if not self.chat or event.value is Select.NULL or event.value == self.chat.server_id:
             return
         cfg = self._server_by_id(event.value)
         if cfg is None:
             return
+        if self._streaming:
+            self.notify("Stop the current response before switching models", severity="warning")
+            self._revert_server_select()
+            return
+        self.run_worker(self._confirm_and_switch(cfg), exclusive=True, group="server-switch")
+
+    @on(Select.Changed, "#skill-select")
+    def _skill_changed(self, event: Select.Changed) -> None:
+        if not self.chat:
+            return
+        new = None if event.value is Select.NULL else event.value
+        if new == self.chat.skill_id:
+            return
+        self.chat.skill_id = new
+        self._update_topbar()
+        self._persist()
+        skill = skills.get_skill(new)
+        self.notify(f"Skill: {skill.name}" if skill else "Skill cleared")
+
+    def _revert_server_select(self) -> None:
+        sel = self.query_one("#server-select", Select)
+        sel.value = self.chat.server_id if (self.chat and self.chat.server_id) else Select.NULL
+
+    async def _confirm_and_switch(self, cfg: ServerConfig) -> None:
+        old = self._server_by_id(self.chat.server_id) if self.chat.server_id else None
+        old_mgr = self.app.get_manager(old.id) if old else None
+        old_running = bool(old_mgr and old_mgr.is_running)
+        unload = (
+            f"This unloads '{escape(old.name)}'" + (" (currently running)" if old_running else "")
+            if old else "This starts the selected model"
+        )
+        prompt = (
+            f"Switch this chat to '{escape(cfg.name)}'?\n\n"
+            f"{unload} and loads '{escape(cfg.name)}' on the server — the current model's "
+            "loaded context (weights + KV cache) will be lost."
+        )
+        ok = await self.app.push_screen_wait(ConfirmModal(prompt, confirm_label="Switch & reload"))
+        if not ok:
+            self._revert_server_select()
+            return
+
+        # 1) unload the previous model
+        if old_running:
+            self.notify(f"Unloading {old.name} …")
+            await old_mgr.stop()
+
+        # 2) repoint the chat at the new profile
         self.chat.server_id = cfg.id
         self.chat.base_url = cfg.base_url()
         self.chat.model = cfg.model
         self.chat.reasoning = self.chat.reasoning and capabilities.supports_reasoning(cfg.model)
+        self.app.config.settings.last_used_id = cfg.id
+        self.app.save_config()
         self._sync_reasoning_switch()
         self._update_topbar()
         self._persist()
+        self._refresh_chats()
+
+        # 3) load the new model
+        await self._load_server(cfg)
+
+    async def _load_server(self, cfg: ServerConfig) -> None:
+        mgr = self.app.get_manager(cfg.id)
+        if mgr is not None and mgr.is_running:
+            self.notify(f"{cfg.name} is already running")
+            return
+        mgr = self.app.create_manager(cfg)
+        self.notify(f"Loading {cfg.name} — model load can take a while …")
+        try:
+            await mgr.start()
+        except BinaryNotFound:
+            self.notify(
+                f"{discovery.binary_name(cfg.engine)} not found — press p on the dashboard to install",
+                severity="error",
+            )
+            return
+        except PortInUse as exc:
+            self.notify(str(exc), severity="error")
+            return
+        except Exception as exc:  # noqa: BLE001
+            self.notify(f"Failed to start: {exc}", severity="error")
+            return
+        # surface readiness/failure (model load happens after spawn). Poll status,
+        # not is_running — the process can exit a beat before ERROR is recorded.
+        for _ in range(900):  # ~270s budget for a slow model load
+            status = mgr.status
+            if status is ServerStatus.READY:
+                self.notify(f"{cfg.name} ready")
+                return
+            if status in (ServerStatus.ERROR, ServerStatus.STOPPED):
+                self.notify(mgr.status_message or "model failed to load", severity="error")
+                return
+            await asyncio.sleep(0.3)
+        self.notify(f"{cfg.name}: still loading — open it from the dashboard to watch", severity="warning")
 
     @on(Switch.Changed, "#reasoning")
     def _reasoning_changed(self, event: Switch.Changed) -> None:
@@ -445,6 +601,15 @@ class ChatScreen(Screen):
         if self.chat:
             self.chat.tools = event.value
             self._persist()
+
+    @on(Switch.Changed, "#plan")
+    def _plan_changed(self, event: Switch.Changed) -> None:
+        if self.chat:
+            self.chat.plan_mode = event.value
+            self._update_topbar()
+            self._persist()
+            self.notify("Plan mode on — I'll propose a plan to approve, not make changes"
+                        if event.value else "Plan mode off")
 
     @on(Button.Pressed, "#new-chat")
     def _new_chat_btn(self) -> None:
@@ -529,7 +694,7 @@ class ChatScreen(Screen):
     def _refresh_attachments(self) -> None:
         bar = self.query_one("#attachments", Static)
         if self._pending:
-            chips = "   ".join(f"⊕ {escape(a.name)} [dim]({a.kind})[/]" for a in self._pending)
+            chips = "   ".join(f"{escape(a.name)} [dim]({a.kind})[/]" for a in self._pending)
             bar.update(f"{chips}   [dim]· ctrl+l clears[/]")
             bar.remove_class("hidden")
         else:
@@ -540,6 +705,10 @@ class ChatScreen(Screen):
         if self.chat:
             store.upsert_chat(self.data, self.chat)
             store.save(self.data)
+        try:
+            self._update_context_bar()
+        except Exception:  # noqa: BLE001 — bar is best-effort
+            pass
 
     def _set_generating(self, on: bool) -> None:
         self._streaming = on
@@ -575,6 +744,18 @@ class ChatScreen(Screen):
         from .mcp_manager import McpManagerScreen
 
         self.app.push_screen(McpManagerScreen())
+
+    def action_skills(self) -> None:
+        from .skills_manager import SkillsManagerScreen
+
+        self.app.push_screen(SkillsManagerScreen())
+
+    def on_screen_resume(self) -> None:
+        # returning from a manager/editor: pick up new skills and project edits
+        self._refresh_skills()
+        self._refresh_projects()
+        self._refresh_chats()
+        self._update_topbar()
 
     def action_toggle_attach(self) -> None:
         field = self.query_one("#attach", Input)
@@ -623,7 +804,9 @@ class ChatScreen(Screen):
             self.notify("Nothing selected to delete", severity="warning")
             return
         kind, ident, label = target
-        ok = await self.app.push_screen_wait(ConfirmModal(f'Delete this {kind}?\n"{label}"'))
+        ok = await self.app.push_screen_wait(
+            ConfirmModal(f'Delete this {kind}?\n"{label}"', confirm_label="Delete")
+        )
         if not ok:
             return
         if kind == "project":
@@ -707,17 +890,21 @@ class ChatScreen(Screen):
             lines.append("")
         return "\n".join(lines)
 
-    @work
-    async def _new_project(self) -> None:
-        name = await self.app.push_screen_wait(TextPromptModal("New project name"))
-        if not name:
+    def _new_project(self) -> None:
+        from .project_editor import ProjectEditorScreen
+
+        self.app.push_screen(ProjectEditorScreen(self.data))
+
+    def action_edit_project(self) -> None:
+        item = self.query_one("#projects", ListView).highlighted_child
+        pid = getattr(item, "project_id", None)
+        proj = store.get_project(self.data, pid) if pid else None
+        if proj is None:
+            self.notify("Select a project in the sidebar to edit it", severity="warning")
             return
-        project = Project(name=name)
-        store.upsert_project(self.data, project)
-        store.save(self.data)
-        self.project_filter = project.id
-        self._refresh_projects()
-        self._refresh_chats()
+        from .project_editor import ProjectEditorScreen
+
+        self.app.push_screen(ProjectEditorScreen(self.data, proj))
 
     def action_send(self) -> None:
         if self._streaming:
@@ -747,9 +934,18 @@ class ChatScreen(Screen):
         self.call_after_refresh(self._scroll_end)
         self._generate()
 
+    def _fs_root(self) -> Optional[str]:
+        """The project's working directory if it exists on disk, else None."""
+        proj = self._current_project()
+        if proj and proj.working_dir:
+            path = os.path.expanduser(proj.working_dir)
+            if os.path.isdir(path):
+                return path
+        return None
+
     @work
     async def _generate(self) -> None:
-        if self.chat and (self.chat.web_search or self.chat.tools):
+        if self.chat and (self.chat.web_search or self.chat.tools or self._fs_root()):
             await self._generate_tools()
         else:
             await self._generate_stream()
@@ -762,7 +958,7 @@ class ChatScreen(Screen):
         think_body: Optional[Static] = None
 
         client = ChatClient(self.chat.base_url, self.chat.model)
-        messages = build_openai_messages(self.chat, self._current_project())
+        messages = build_openai_messages(self.chat, self._current_project(), self._skill_instructions())
         reason_acc: list[str] = []
         content_acc: list[str] = []
         last_render = 0
@@ -836,17 +1032,23 @@ class ChatScreen(Screen):
         assert self.chat is not None
         transcript = self.query_one("#transcript", VerticalScroll)
         client = ChatClient(self.chat.base_url, self.chat.model)
-        messages = build_openai_messages(self.chat, self._current_project())
+        messages = build_openai_messages(self.chat, self._current_project(), self._skill_instructions())
+        fs_root = self._fs_root()
+        if fs_root:
+            messages.insert(0, {"role": "system", "content": fs_tools.system_note(fs_root)})
         self._cancel = False
         self._set_generating(True)
         t0 = time.monotonic()
         n_calls = 0
         final_text = ""
+        max_iters = 24 if fs_root else 8
         try:
             async with AsyncExitStack() as stack:
                 specs = []
                 if self.chat.web_search:
                     specs.append(chat_tools.web_search_spec())
+                if fs_root:
+                    specs += fs_tools.fs_specs()
                 sessions, router = {}, {}
                 if self.chat.tools:
                     servers = store.load().mcp_servers  # pick up edits from the MCP manager
@@ -856,14 +1058,14 @@ class ChatScreen(Screen):
                         on_error=lambda name, err: self.notify(f"MCP {name}: {err}", severity="warning"),
                     )
                     specs += mcp_specs
-                for _ in range(8):
+                for _ in range(max_iters):
                     if self._cancel:
                         break
                     data = await client.bridge.chat(messages, tools=specs)
                     choice = (data.get("choices") or [{}])[0]
                     msg = choice.get("message") or {}
                     tool_calls = msg.get("tool_calls") or []
-                    content = msg.get("content") or ""
+                    content, _reason = parse_harmony(msg.get("content") or "")
                     if not tool_calls:
                         messages.append({"role": "assistant", "content": content})
                         final_text = content
@@ -871,7 +1073,7 @@ class ChatScreen(Screen):
                     messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
                     for call in tool_calls:
                         n_calls += 1
-                        result = await self._exec_tool(call, sessions, router, transcript)
+                        result = await self._exec_tool(call, sessions, router, transcript, fs_root)
                         messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": result[:8000]})
                     self._scroll_end()
         except Exception as exc:  # noqa: BLE001
@@ -894,7 +1096,7 @@ class ChatScreen(Screen):
             pass
         self._scroll_end()
 
-    async def _exec_tool(self, call: dict, sessions: dict, router: dict, transcript) -> str:
+    async def _exec_tool(self, call: dict, sessions: dict, router: dict, transcript, fs_root: Optional[str] = None) -> str:
         fn = call.get("function") or {}
         name = fn.get("name", "")
         try:
@@ -907,6 +1109,8 @@ class ChatScreen(Screen):
         try:
             if name == "web_search":
                 result = await chat_tools.run_web_search(args.get("query", ""), args.get("max_results", 6))
+            elif fs_root and name in fs_tools.FS_TOOL_NAMES:
+                result = await fs_tools.run_fs_tool(fs_root, name, args)
             elif name in router:
                 result = await mcp_client.call_mcp(sessions, router, name, args)
             else:
@@ -921,3 +1125,6 @@ class ChatScreen(Screen):
         if self.chat and self.chat.project_id:
             return store.get_project(self.data, self.chat.project_id)
         return None
+
+    def _skill_instructions(self) -> Optional[str]:
+        return skills.instructions_for(self.chat.skill_id) if self.chat else None

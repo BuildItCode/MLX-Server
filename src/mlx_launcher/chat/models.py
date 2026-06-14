@@ -48,9 +48,11 @@ class Chat(BaseModel):
     server_id: Optional[str] = None  # the ServerConfig this chat targets
     base_url: str = ""
     model: str = ""
+    skill_id: Optional[str] = None  # active skill injected as system guidance
     reasoning: bool = False  # show/stream the model's thinking
     web_search: bool = False  # allow the model to call the web_search tool
     tools: bool = False  # allow the model to call MCP server tools
+    plan_mode: bool = False  # plan-only: produce a plan for approval, take no actions
     messages: list[ChatMessage] = Field(default_factory=list)
     created: float = Field(default_factory=_now)
     updated: float = Field(default_factory=_now)
@@ -62,6 +64,7 @@ class Project(BaseModel):
     id: str = Field(default_factory=_new_id)
     name: str = "Untitled project"
     instructions: str = ""  # used as a system prompt for its chats
+    working_dir: Optional[str] = None  # if set, chats get file tools scoped here
     created: float = Field(default_factory=_now)
 
 

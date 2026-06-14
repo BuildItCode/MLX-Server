@@ -58,7 +58,8 @@ class MlxLauncherApp(App):
     #chat-main { width: 1fr; }
     #chat-topbar { height: auto; padding: 0 1; }
     #chat-title { width: 1fr; padding: 1 0 0 0; }
-    #server-select { width: 26; }
+    #server-select { width: 34; }
+    #skill-select { width: 40; }
     #reason-label { padding: 1 1 0 1; }
     #transcript { height: 1fr; padding: 0 1; }
     #attachments { height: auto; padding: 0 1; }
@@ -71,6 +72,7 @@ class MlxLauncherApp(App):
     #chat-toggles { height: auto; padding: 0 1; }
     .actions-spacer { width: 1fr; height: 1; }
     .toggle-label { padding: 1 1 0 1; color: $text-muted; }
+    .ctx-bar { width: auto; padding: 1 1 0 0; }
     .msg-row { height: auto; width: 1fr; }
     .msg-spacer { width: 1fr; height: auto; }
     .msg { height: auto; width: 80%; max-width: 80%; margin: 1 0 0 0; padding: 0 0 0 1; border-left: solid $panel; }
@@ -103,6 +105,18 @@ class MlxLauncherApp(App):
     #mcp-form { height: auto; padding: 0 1; }
     #mcp-buttons { height: auto; padding: 1 0; }
     #mcp-buttons Button { margin: 0 1 0 0; }
+    #skills-list { height: 1fr; border: round $panel; }
+    #skills-buttons { height: auto; padding: 1 0; }
+    #skills-buttons Button { margin: 0 1 0 0; }
+    #skills-log { height: 12; border: round $panel; }
+    #skill-form { height: 1fr; padding: 0 1; }
+    #s-body { height: 16; border: round $panel; }
+    #skill-buttons { height: auto; padding: 1 0; }
+    #skill-buttons Button { margin: 0 1 0 0; }
+    #project-form { height: 1fr; padding: 0 1; }
+    #p-instructions { height: 10; border: round $panel; }
+    #project-buttons { height: auto; padding: 1 0; }
+    #project-buttons Button { margin: 0 1 0 0; }
     TextPromptModal, ConfirmModal { align: center middle; background: $background 60%; }
     #modal-box { width: 64; height: auto; padding: 1 2; border: round $primary; background: $surface; }
     #modal-buttons { height: auto; padding: 1 0 0 0; }

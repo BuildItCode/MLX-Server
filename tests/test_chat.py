@@ -49,6 +49,70 @@ def test_think_splitter_across_chunks():
     assert content == "Hello  world"
 
 
+def test_harmony_parser_routes_channels_across_chunks():
+    from mlx_launcher.chat.client import HarmonyParser
+
+    # the exact gpt-oss shape from the screenshot, split so control tokens straddle
+    full = (
+        '<|channel|>analysis<|message|>The user says "hello". Respond politely.'
+        "<|end|><|start|>assistant<|channel|>final<|message|>Hello! How can I help you today?<|return|>"
+    )
+    p = HarmonyParser()
+    out = []
+    for i in range(0, len(full), 7):  # 7-char chunks force mid-token splits
+        out += p.feed(full[i:i + 7])
+    out += p.flush()
+    reason = "".join(t for k, t in out if k == "reason")
+    content = "".join(t for k, t in out if k == "content")
+    assert reason == 'The user says "hello". Respond politely.'
+    assert content == "Hello! How can I help you today?"
+    assert "<|" not in content and "<|" not in reason  # all control tokens stripped
+
+
+def test_harmony_passthrough_for_normal_text():
+    from mlx_launcher.chat.client import HarmonyParser, parse_harmony
+
+    p = HarmonyParser()
+    out = p.feed("Just a normal answer with a < and a |.") + p.flush()
+    assert "".join(t for k, t in out if k == "content") == "Just a normal answer with a < and a |."
+    assert not [t for k, t in out if k == "reason"]
+    # one-shot helper, no markup
+    assert parse_harmony("plain reply") == ("plain reply", "")
+
+
+def test_parse_harmony_oneshot_splits():
+    from mlx_launcher.chat.client import parse_harmony
+
+    content, reason = parse_harmony(
+        "<|channel|>analysis<|message|>thinking<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>the answer<|return|>"
+    )
+    assert content == "the answer"
+    assert reason == "thinking"
+
+
+def test_context_window_from_config_name_and_unknown(tmp_path):
+    from mlx_launcher.chat import capabilities
+
+    (tmp_path / "config.json").write_text('{"max_position_embeddings": 32768}')
+    assert capabilities.context_window(str(tmp_path)) == 32768  # local config wins
+    assert capabilities.context_window("mlx-community/Qwen2.5-7B-128k") == 128 * 1024  # name hint
+    assert capabilities.context_window("gpt-oss-120b") is None  # 120b is params, not ctx
+    assert capabilities.context_window("some-random-model") is None  # unknown → hidden
+
+
+def test_estimate_prompt_tokens():
+    from mlx_launcher.chat import capabilities
+
+    msgs = [
+        {"role": "system", "content": "x" * 40},
+        {"role": "user", "content": [{"type": "text", "text": "y" * 40}, {"type": "image_url", "image_url": {}}]},
+    ]
+    t = capabilities.estimate_prompt_tokens(msgs)
+    assert t >= 800  # the image dominates
+    assert capabilities.approx_tokens("12345678") == 2
+
+
 def test_capabilities_heuristics():
     assert cap.supports_vision("mlx-community/Qwen2.5-VL-7B-Instruct")
     assert not cap.supports_vision("Qwen2.5-7B-Instruct")
