@@ -197,6 +197,11 @@ class MlxLauncherApp(App):
     def get_manager(self, cfg_id: str) -> Optional[ServerManager]:
         return self._managers.get(cfg_id)
 
+    def running_managers(self) -> list[ServerManager]:
+        """Every server manager with a live process. Only one server can bind a
+        given host:port, so callers use this to free a port before launching."""
+        return [m for m in self._managers.values() if m.is_running]
+
     def on_unmount(self) -> None:
         # Best-effort: don't orphan server processes on quit.
         for manager in self._managers.values():

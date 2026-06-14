@@ -86,7 +86,9 @@ class MlxAcpAgent:
         self.base_url = base_url
         self.model = model
         self.use_tools = use_tools
-        self.bridge = MlxBridge(base_url, model, api_key)
+        # match the chat UI's budget so reasoning models aren't cut off at the
+        # server's 512-token default (see chat/client.py:DEFAULT_MAX_TOKENS)
+        self.bridge = MlxBridge(base_url, model, api_key, max_tokens=16384)
         self._client: Optional[acp.Client] = None
         self._sessions: dict[str, list[dict]] = {}
         self._cancelled: set[str] = set()

@@ -106,6 +106,39 @@ def test_parse_harmony_oneshot_splits():
     assert reason == "thinking"
 
 
+def test_parse_harmony_tool_calls_recovers_commentary_call():
+    # the exact gpt-oss shape: mlx_lm returns this verbatim (no native tool_calls),
+    # so web search silently did nothing. We must recover the call from the text.
+    from mlx_launcher.chat.client import parse_harmony, parse_harmony_tool_calls
+
+    raw = (
+        "<|channel|>analysis<|message|>I should look this up.<|end|>"
+        "<|start|>assistant<|channel|>commentary to=functions.web_search "
+        '<|constrain|>json<|message|>{"query": "uefa fixtures next week"}<|call|>'
+    )
+    calls = parse_harmony_tool_calls(raw)
+    assert calls == [{"name": "web_search", "arguments": {"query": "uefa fixtures next week"}}]
+    # and the visible answer is empty (only analysis + the call) — which is exactly
+    # why the UI showed "(no answer)" before the fix
+    content, reason = parse_harmony(raw)
+    assert content == "" and "look this up" in reason
+
+    # two calls in one turn, and a no-constrain variant
+    multi = (
+        '<|channel|>commentary to=functions.a<|message|>{"x": 1}<|call|>'
+        '<|start|>assistant<|channel|>commentary to=functions.b <|constrain|>json<|message|>{"y": 2}<|call|>'
+    )
+    assert parse_harmony_tool_calls(multi) == [
+        {"name": "a", "arguments": {"x": 1}},
+        {"name": "b", "arguments": {"y": 2}},
+    ]
+    # ordinary text and normal final answers have no calls
+    assert parse_harmony_tool_calls("just a normal reply") == []
+    assert parse_harmony_tool_calls(
+        "<|channel|>final<|message|>here is your answer<|return|>"
+    ) == []
+
+
 def test_prepend_system_never_emits_two_system_messages():
     from mlx_launcher.chat.client import build_openai_messages, prepend_system
     from mlx_launcher.chat.models import Chat, ChatMessage, Project
@@ -164,6 +197,96 @@ def test_bridge_chat_aborts_promptly_on_stop():
         return await asyncio.wait_for(task, timeout=2.0)  # must return ~immediately
 
     assert asyncio.run(go()) is None  # cancelled → None (loop breaks → button resets)
+
+
+def test_chat_requests_a_real_token_budget(monkeypatch):
+    # mlx_lm.server caps at 512 tokens by default, truncating a reasoning model
+    # before it answers — the chat must send its own budget on every request.
+    import asyncio
+
+    import mlx_launcher.acp.bridge as bridge_mod
+    from mlx_launcher.acp.bridge import MlxBridge
+    from mlx_launcher.chat.client import DEFAULT_MAX_TOKENS, ChatClient
+
+    captured = {}
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            captured.update(json)
+            return FakeResp()
+
+    monkeypatch.setattr(bridge_mod.httpx, "AsyncClient", FakeClient)
+    asyncio.run(MlxBridge("http://x/v1", "m", max_tokens=2048).chat([{"role": "user", "content": "hi"}]))
+    assert captured["max_tokens"] == 2048
+
+    # ChatClient defaults to a generous budget (not the server's 512)
+    assert ChatClient("http://x/v1", "m").bridge.max_tokens == DEFAULT_MAX_TOKENS == 16384
+
+    # no budget set → key omitted (server default applies), never sent as 0/None
+    captured.clear()
+    asyncio.run(MlxBridge("http://x/v1", "m").chat([{"role": "user", "content": "hi"}]))
+    assert "max_tokens" not in captured
+
+
+def test_port_blockers_stops_every_server_on_the_target_port(monkeypatch):
+    # All profiles default to :8080, so switching models must free the port by
+    # stopping whatever holds it — not just the chat's previously-linked server.
+    from mlx_launcher.chat.models import Chat
+    from mlx_launcher.screens.chat import ChatScreen
+
+    class Cfg:
+        def __init__(self, id, port=8080, host="127.0.0.1"):
+            self.id, self.port, self.host, self.name = id, port, host, f"srv-{id}"
+
+    class Mgr:
+        def __init__(self, cfg, running=True):
+            self.cfg, self._running = cfg, running
+
+        @property
+        def is_running(self):
+            return self._running
+
+    target = Cfg("new", port=8080)
+    mgrs = {
+        "A": Mgr(Cfg("A", port=9999)),            # the chat's OLD model on another port → STOP anyway
+        "D": Mgr(Cfg("D", port=8080)),            # a different profile on the TARGET port → STOP
+        "B": Mgr(Cfg("B", port=8080), running=False),  # not running → ignore
+        "C": Mgr(Cfg("C", port=8081)),            # unrelated, different port → ignore
+        "new": Mgr(target),                       # the model we're switching TO → never stop
+    }
+
+    class FakeApp:
+        class config:
+            servers = [Cfg("A", port=9999), target]
+        def get_manager(self, cid):
+            return mgrs.get(cid)
+        def running_managers(self):
+            return [m for m in mgrs.values() if m.is_running]
+
+    cs = ChatScreen.__new__(ChatScreen)
+    cs.chat = Chat(server_id="A")  # this chat's previous server (on a different port)
+    fake_app = FakeApp()
+    monkeypatch.setattr(ChatScreen, "app", property(lambda self: fake_app))
+
+    blocked = {m.cfg.id for m in cs._port_blockers(target)}
+    # A = the chat's old model (freed regardless of port); D = occupant of the target
+    # port. NOT B (stopped), C (unrelated port), or the target itself.
+    assert blocked == {"A", "D"}
 
 
 def test_perm_prompt_summaries():

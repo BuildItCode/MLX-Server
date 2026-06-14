@@ -38,10 +38,15 @@ async def fetch_models(base_url: str, api_key: str = "not-needed", *, timeout: f
 class MlxBridge:
     """Talks chat completions to the MLX server (streaming and non-streaming)."""
 
-    def __init__(self, base_url: str, model: str, api_key: str = "not-needed") -> None:
+    def __init__(
+        self, base_url: str, model: str, api_key: str = "not-needed", max_tokens: Optional[int] = None
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
+        # mlx_lm.server defaults to only 512 generated tokens, which truncates a
+        # reasoning model mid-thought (empty answer). Send a real budget per request.
+        self.max_tokens = max_tokens
 
     @property
     def _headers(self) -> dict:
@@ -57,7 +62,9 @@ class MlxBridge:
         then a final ('finish', reason) with the raw OpenAI finish_reason (or
         'cancelled')."""
         url = f"{self.base_url}/chat/completions"
-        payload = {"model": self.model, "messages": messages, "stream": True}
+        payload: dict = {"model": self.model, "messages": messages, "stream": True}
+        if self.max_tokens:
+            payload["max_tokens"] = self.max_tokens
         timeout = httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0)
         finish = "stop"
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -98,14 +105,18 @@ class MlxBridge:
         messages: list[dict],
         tools: Optional[list[dict]] = None,
         *,
-        read_timeout: float = 300.0,
+        read_timeout: float = 600.0,
     ) -> dict:
         """One non-streaming completion (used by the agentic tool loop). Returns the
-        parsed response JSON."""
+        parsed response JSON. The window is generous because this call blocks for the
+        whole (possibly long, up to max_tokens) response; Stop stays responsive because
+        the caller polls cancellation separately (see ChatScreen._bridge_chat)."""
         url = f"{self.base_url}/chat/completions"
         payload: dict = {"model": self.model, "messages": messages, "stream": False}
         if tools:
             payload["tools"] = tools
+        if self.max_tokens:
+            payload["max_tokens"] = self.max_tokens
         timeout = httpx.Timeout(connect=10.0, read=read_timeout, write=30.0, pool=10.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=payload, headers=self._headers)

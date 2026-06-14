@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mlx-launcher"
-version = "0.1.0"
-description = "A Claude-Code-styled terminal app to launch and manage MLX (mlx_lm.server) servers, with Xcode 27 OpenAI-provider + ACP integration."
+version = "0.1.1"
+description = "A TUI to launch and manage MLX (mlx_lm.server) servers, with Xcode 27 OpenAI-provider + ACP integration."
 readme = "README.md"
 requires-python = ">=3.10,<3.15"
 license = { text = "MIT" }

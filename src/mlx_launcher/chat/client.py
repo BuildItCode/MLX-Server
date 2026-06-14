@@ -7,6 +7,8 @@ incremental splitter)."""
 
 from __future__ import annotations
 
+import json
+import re
 from typing import AsyncIterator, Callable, Optional
 
 from ..acp.bridge import MlxBridge
@@ -170,6 +172,57 @@ def parse_harmony(text: str) -> tuple[str, str]:
     return content, reason
 
 
+# gpt-oss emits tool calls in the Harmony *commentary* channel, e.g.
+#   <|channel|>commentary to=functions.web_search <|constrain|>json<|message|>{"query":"…"}<|call|>
+# mlx_lm.server has no gpt-oss tool parser (has_tool_calling=False), so it returns
+# this verbatim in `content` instead of as a native `tool_calls` entry — leaving the
+# call unexecuted and the answer empty. We recover the call from the raw text.
+_HARMONY_CALL_RE = re.compile(
+    r"to=functions\.(?P<name>[A-Za-z0-9_.\-]+)"          # recipient: functions.<name>
+    r".*?"                                                # rest of header (<|constrain|>json, ws)
+    r"<\|message\|>(?P<args>.*?)"                         # the JSON arguments
+    r"(?=<\|call\|>|<\|end\|>|<\|return\|>|<\|start\|>|\Z)",
+    re.DOTALL,
+)
+
+
+def _loads_lenient(raw: str) -> dict:
+    """Parse a JSON object, salvaging the first balanced {...} if there's trailing junk."""
+    raw = (raw or "").strip()
+    if not raw:
+        return {}
+    try:
+        obj = json.loads(raw)
+        return obj if isinstance(obj, dict) else {}
+    except ValueError:
+        pass
+    start = raw.find("{")
+    if start == -1:
+        return {}
+    depth = 0
+    for i in range(start, len(raw)):
+        if raw[i] == "{":
+            depth += 1
+        elif raw[i] == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    obj = json.loads(raw[start:i + 1])
+                    return obj if isinstance(obj, dict) else {}
+                except ValueError:
+                    return {}
+    return {}
+
+
+def parse_harmony_tool_calls(text: str) -> list[dict]:
+    """Extract [{name, arguments}] from Harmony `commentary to=functions.*` tool
+    calls that a server returned as plain text. Empty list when there is none."""
+    out: list[dict] = []
+    for m in _HARMONY_CALL_RE.finditer(text or ""):
+        out.append({"name": m.group("name"), "arguments": _loads_lenient(m.group("args"))})
+    return out
+
+
 def _message_to_openai(m: ChatMessage) -> dict:
     if m.role == "assistant":
         return {"role": "assistant", "content": m.text}
@@ -237,9 +290,17 @@ def build_openai_messages(
     return msgs
 
 
+# A reasoning model spends its token budget on the analysis channel *before* the
+# answer, so the server's 512-token default leaves nothing for the reply. Ask for
+# a real budget; a profile's own --max-tokens (if set) overrides this in chat.py.
+DEFAULT_MAX_TOKENS = 16384
+
+
 class ChatClient:
-    def __init__(self, base_url: str, model: str, api_key: str = "not-needed") -> None:
-        self.bridge = MlxBridge(base_url, model, api_key)
+    def __init__(
+        self, base_url: str, model: str, api_key: str = "not-needed", max_tokens: int = DEFAULT_MAX_TOKENS
+    ) -> None:
+        self.bridge = MlxBridge(base_url, model, api_key, max_tokens=max_tokens)
 
     async def stream(
         self,

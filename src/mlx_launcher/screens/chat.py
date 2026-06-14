@@ -42,7 +42,14 @@ from textual.widgets import (
 from ..chat import capabilities, fs_tools, mcp_client, prompted_tools, skills, store
 from ..chat import tools as chat_tools
 from ..chat.blocks import split_blocks
-from ..chat.client import ChatClient, build_openai_messages, parse_harmony, prepend_system
+from ..chat.client import (
+    DEFAULT_MAX_TOKENS,
+    ChatClient,
+    build_openai_messages,
+    parse_harmony,
+    parse_harmony_tool_calls,
+    prepend_system,
+)
 from ..chat.models import Attachment, Chat, ChatMessage, Project
 from ..config.models import ServerConfig
 from ..server import discovery
@@ -386,6 +393,14 @@ class ChatScreen(Screen):
     def _server_by_id(self, sid: Optional[str]) -> Optional[ServerConfig]:
         return next((s for s in self.app.config.servers if s.id == sid), None)
 
+    def _client(self) -> ChatClient:
+        """A chat client whose token budget respects the profile's --max-tokens
+        (if the user set one) and otherwise falls back to a generous default —
+        never the server's truncating 512-token default."""
+        cfg = self._server_by_id(self.chat.server_id) if (self.chat and self.chat.server_id) else None
+        max_tokens = (cfg.max_tokens if cfg and cfg.max_tokens else DEFAULT_MAX_TOKENS)
+        return ChatClient(self.chat.base_url, self.chat.model, max_tokens=max_tokens)
+
     def _server_label_for(self, chat: Optional[Chat]) -> str:
         """The user-given profile name for a chat's server (falls back to the model)."""
         cfg = self._server_by_id(chat.server_id) if chat and chat.server_id else None
@@ -575,17 +590,33 @@ class ChatScreen(Screen):
         sel = self.query_one("#server-select", Select)
         sel.value = self.chat.server_id if (self.chat and self.chat.server_id) else Select.NULL
 
-    async def _confirm_and_switch(self, cfg: ServerConfig) -> None:
+    def _port_blockers(self, cfg: ServerConfig) -> list:
+        """Running servers that must be stopped before `cfg` can bind its port:
+        this chat's previous server PLUS anything else already on that host:port.
+        All profiles default to :8080, so the occupant is often a *different*
+        profile than the chat's previous one — stopping only `old` left the port
+        taken and the new model failed with "already in use"."""
         old = self._server_by_id(self.chat.server_id) if self.chat.server_id else None
+        by_id: dict[str, object] = {}
         old_mgr = self.app.get_manager(old.id) if old else None
-        old_running = bool(old_mgr and old_mgr.is_running)
-        unload = (
-            f"This unloads '{escape(old.name)}'" + (" (currently running)" if old_running else "")
-            if old else "This starts the selected model"
-        )
+        if old_mgr and old_mgr.is_running:
+            by_id[old.id] = old_mgr
+        for m in self.app.running_managers():
+            if m.cfg.host == cfg.host and m.cfg.port == cfg.port:
+                by_id[m.cfg.id] = m
+        by_id.pop(cfg.id, None)  # never stop the model we're about to (re)use
+        return list(by_id.values())
+
+    async def _confirm_and_switch(self, cfg: ServerConfig) -> None:
+        blockers = self._port_blockers(cfg)
+        if blockers:
+            names = ", ".join(m.cfg.name for m in blockers)
+            unload = f"This unloads {names}"
+        else:
+            unload = "This starts the selected model"
         prompt = (
-            f"Switch this chat to '{escape(cfg.name)}'?\n\n"
-            f"{unload} and loads '{escape(cfg.name)}' on the server — the current model's "
+            f"Switch this chat to '{cfg.name}'?\n\n"
+            f"{unload} and loads '{cfg.name}' on the server — the current model's "
             "loaded context (weights + KV cache) will be lost."
         )
         ok = await self.app.push_screen_wait(ConfirmModal(prompt, confirm_label="Switch & reload"))
@@ -593,10 +624,10 @@ class ChatScreen(Screen):
             self._revert_server_select()
             return
 
-        # 1) unload the previous model
-        if old_running:
-            self.notify(f"Unloading {old.name} …")
-            await old_mgr.stop()
+        # 1) unload every server holding the target port (not just the chat's old one)
+        for mgr in blockers:
+            self.notify(f"Unloading {mgr.cfg.name} …")
+            await mgr.stop()
 
         # 2) repoint the chat at the new profile
         self.chat.server_id = cfg.id
@@ -618,6 +649,12 @@ class ChatScreen(Screen):
         if mgr is not None and mgr.is_running:
             self.notify(f"{cfg.name} is already running")
             return
+        # A server we just stopped may not have released the port yet; give the OS
+        # a moment so start()'s bind-check doesn't race and report "already in use".
+        for _ in range(20):  # ~2s
+            if discovery.is_port_free(cfg.host, cfg.port):
+                break
+            await asyncio.sleep(0.1)
         mgr = self.app.create_manager(cfg)
         self.notify(f"Loading {cfg.name} — model load can take a while …")
         try:
@@ -1043,7 +1080,7 @@ class ChatScreen(Screen):
         await transcript.mount(assistant_box)
         think_body: Optional[Static] = None
 
-        client = ChatClient(self.chat.base_url, self.chat.model)
+        client = self._client()
         messages = build_openai_messages(self.chat, self._current_project(), self._skill_instructions())
         reason_acc: list[str] = []
         content_acc: list[str] = []
@@ -1117,7 +1154,7 @@ class ChatScreen(Screen):
         model's tool calls, then render the final answer."""
         assert self.chat is not None
         transcript = self.query_one("#transcript", VerticalScroll)
-        client = ChatClient(self.chat.base_url, self.chat.model)
+        client = self._client()
         messages = build_openai_messages(self.chat, self._current_project(), self._skill_instructions())
         fs_root = self._fs_root()
         if fs_root:
@@ -1186,12 +1223,27 @@ class ChatScreen(Screen):
                         break
                     choice = (data.get("choices") or [{}])[0]
                     msg = choice.get("message") or {}
+                    raw = msg.get("content") or ""
                     tool_calls = msg.get("tool_calls") or []
-                    content, _reason = parse_harmony(msg.get("content") or "")
-                    if not tool_calls:
+                    content, reason = parse_harmony(raw)
+                    # gpt-oss puts calls in the Harmony commentary channel; mlx_lm
+                    # returns them as text, not native tool_calls — recover them.
+                    harmony_calls = parse_harmony_tool_calls(raw) if not tool_calls else []
+                    if not tool_calls and not harmony_calls:
                         messages.append({"role": "assistant", "content": content})
                         final_text = content
                         break
+                    if harmony_calls:
+                        # Echo a CLEAN assistant turn (raw Harmony tokens would nest
+                        # channels and confuse the template), then feed each result
+                        # back as a user message — the round-trip gpt-oss renders.
+                        messages.append({"role": "assistant", "content": reason or content or "Calling tools."})
+                        for call in harmony_calls:
+                            n_calls += 1
+                            result = await self._exec_tool(call["name"], call["arguments"], sessions, router, transcript, fs_root)
+                            messages.append({"role": "user", "content": prompted_tools.tool_response(call["name"], result[:8000])})
+                        self._scroll_end()
+                        continue
                     messages.append({"role": "assistant", "content": content or None, "tool_calls": tool_calls})
                     for call in tool_calls:
                         n_calls += 1
