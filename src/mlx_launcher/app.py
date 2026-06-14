@@ -82,6 +82,7 @@ class MlxLauncherApp(App):
     .msg-assistant { border-left: solid $primary; }
     .msg-assistant .msg-role { color: $primary; }
     .msg-assistant .msg-body { width: 1fr; }
+    .thinking-indicator { color: $accent; }
     .msg-think { border-left: solid $secondary; }
     .msg-think .msg-role { color: $secondary; }
     .msg-think .msg-body { width: 1fr; color: $text-muted; }

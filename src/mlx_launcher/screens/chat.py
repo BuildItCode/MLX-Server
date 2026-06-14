@@ -57,6 +57,7 @@ from ..server.manager import BinaryNotFound, PortInUse, ServerStatus
 from ..widgets.code_block import CodeBlock
 from ..widgets.path_input import resolve_path
 from ..widgets.safe_content import plain, title_sub
+from ..widgets.thinking import ThinkingIndicator
 from textual.content import Content
 
 
@@ -491,6 +492,17 @@ class ChatScreen(Screen):
     def _bubble(self, role_label: str, role_class: str, body, *, right: bool = False) -> tuple[Horizontal, Static]:
         body_widget = Static(body, classes="msg-body")
         return self._assemble_row(role_label, role_class, [body_widget], right=right), body_widget
+
+    async def _mount_thinking(self, transcript) -> Horizontal:
+        """Mount an animated 'thinking' bubble at the bottom of the transcript and
+        return its row so the caller can remove it once a reply/tool result lands."""
+        row = self._assemble_row(
+            self._server_label_for(self.chat), "msg-assistant",
+            [ThinkingIndicator(classes="msg-body thinking-indicator")],
+        )
+        await transcript.mount(row)
+        self._scroll_end()
+        return row
 
     def _assistant_body_widgets(self, text: str) -> list:
         """Prose runs as Markdown + each fenced code block as a copyable CodeBlock."""
@@ -1076,7 +1088,10 @@ class ChatScreen(Screen):
     async def _generate_stream(self) -> None:
         assert self.chat is not None
         transcript = self.query_one("#transcript", VerticalScroll)
-        assistant_box, assistant_body = self._bubble(self._server_label_for(self.chat), "msg-assistant", "[dim]…[/]")
+        # The answer bubble animates ("Thinking…") until the first content token,
+        # then we stop the spinner and stream the reply into the same widget.
+        assistant_body = ThinkingIndicator(classes="msg-body thinking-indicator")
+        assistant_box = self._assemble_row(self._server_label_for(self.chat), "msg-assistant", [assistant_body])
         await transcript.mount(assistant_box)
         think_body: Optional[Static] = None
 
@@ -1104,6 +1119,8 @@ class ChatScreen(Screen):
                             await transcript.mount(think_box, before=assistant_box)
                         think_body.update(plain("".join(reason_acc)))
                 elif kind == "content":
+                    if not content_acc:  # first real token → stop the spinner, take over
+                        assistant_body.stop()
                     content_acc.append(chunk)
                     joined = "".join(content_acc)
                     # Render Markdown live, but throttle to newline / ~24-char deltas.
@@ -1114,6 +1131,7 @@ class ChatScreen(Screen):
         except Exception as exc:  # noqa: BLE001
             errored = True
             try:
+                assistant_body.stop()
                 assistant_body.update(f"[#e06c75]▲ {escape(str(exc))}[/]")
             except Exception:  # noqa: BLE001
                 pass
@@ -1165,6 +1183,7 @@ class ChatScreen(Screen):
         t0 = time.monotonic()
         n_calls = 0
         final_text = ""
+        thinking = None  # the live "thinking…" bubble between turns (cleaned up below)
         max_iters = 24 if fs_root else 8
         try:
             async with AsyncExitStack() as stack:
@@ -1190,8 +1209,11 @@ class ChatScreen(Screen):
                 for _ in range(max_iters):
                     if self._cancel:
                         break
+                    thinking = await self._mount_thinking(transcript)
                     if prompted:
                         data = await self._bridge_chat(client, messages, None)
+                        await thinking.remove()
+                        thinking = None
                         if data is None:  # stopped
                             break
                         msg = (data.get("choices") or [{}])[0].get("message") or {}
@@ -1211,6 +1233,8 @@ class ChatScreen(Screen):
                     try:
                         data = await self._bridge_chat(client, messages, specs)
                     except Exception as exc:  # native tools rejected → switch this server to prompted
+                        await thinking.remove()
+                        thinking = None
                         if specs and not prompted:
                             prompted = True
                             self._prompted_servers.add(self.chat.server_id or "")
@@ -1219,6 +1243,8 @@ class ChatScreen(Screen):
                                         severity="warning", timeout=8)
                             continue
                         raise
+                    await thinking.remove()
+                    thinking = None
                     if data is None:  # stopped
                         break
                     choice = (data.get("choices") or [{}])[0]
@@ -1257,6 +1283,11 @@ class ChatScreen(Screen):
                     self._scroll_end()
         except Exception as exc:  # noqa: BLE001
             final_text = f"▲ {exc}"
+        if thinking is not None:  # never leave a spinner spinning
+            try:
+                await thinking.remove()
+            except Exception:  # noqa: BLE001
+                pass
 
         elapsed = time.monotonic() - t0
         widgets = self._assistant_body_widgets(final_text or ("(stopped)" if self._cancel else "(no answer)"))

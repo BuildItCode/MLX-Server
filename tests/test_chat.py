@@ -289,6 +289,54 @@ def test_port_blockers_stops_every_server_on_the_target_port(monkeypatch):
     assert blocked == {"A", "D"}
 
 
+def test_thinking_indicator_animates_then_yields_to_content():
+    import asyncio
+
+    from textual.app import App, ComposeResult
+    from textual.containers import VerticalScroll
+
+    from mlx_launcher.widgets.thinking import ThinkingIndicator
+
+    seen: list[str] = []
+    orig = ThinkingIndicator.update
+
+    def rec(self, content="", *a, **k):
+        seen.append(getattr(content, "plain", str(content)))
+        return orig(self, content, *a, **k)
+
+    class T(App):
+        CSS = ".thinking-indicator { color: $accent; }"
+
+        def compose(self) -> ComposeResult:
+            with VerticalScroll():
+                yield ThinkingIndicator(id="ind", classes="msg-body thinking-indicator")
+
+    async def go():
+        app = T()
+        async with app.run_test() as pilot:
+            ThinkingIndicator.update = rec
+            ind = app.query_one("#ind", ThinkingIndicator)
+            assert ind._timer is not None  # animating on mount
+            start = ind._frame
+            await pilot.pause(0.5)
+            assert ind._frame > start  # the spinner advanced
+            assert any("Thinking" in s for s in seen)
+            assert all("[" not in s for s in seen)  # markup-safe frames (no crash)
+            ind.stop()  # first answer token → caller stops the spinner
+            assert ind._timer is None
+            frozen = ind._frame
+            await pilot.pause(0.3)
+            assert ind._frame == frozen  # no longer animating
+            ind.update("real answer")  # content sticks; spinner won't overwrite it
+            await pilot.pause(0.2)
+            assert seen[-1] == "real answer"
+
+    try:
+        asyncio.run(go())
+    finally:
+        ThinkingIndicator.update = orig
+
+
 def test_perm_prompt_summaries():
     from mlx_launcher.screens.chat import _perm_prompt
 
