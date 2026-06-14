@@ -1,9 +1,13 @@
-# MLX Server Launcher
+# MLX Server Launcher (MLXS)
 
 A Claude-Code-styled terminal app (TUI) to launch and manage local
 [`mlx_lm.server`](https://github.com/ml-explore/mlx-lm) (text LLMs) and
 [`mlx_vlm.server`](https://github.com/Blaizzy/mlx-vlm) (vision-language models)
 instances on Apple Silicon.
+
+<p align="center">
+  <img src="preview.png" alt="MLXS chat UI — projects/chats sidebar, skill and server pickers, context bar, and plan/reason/web/tools toggles" width="820">
+</p>
 
 - **Pick the engine** per profile: **mlx-lm** for text LLMs, **mlx-vlm** for
   vision-language models. The launcher emits each engine's correct flags (and routes
@@ -25,7 +29,19 @@ instances on Apple Silicon.
   regenerate / edit-last / export-to-Markdown, and a live **theme picker** (Ctrl+T).
 - **Tool use in chat** (toggle *tools* in the chat): the model can call a built-in
   **web_search** (DuckDuckGo, no API key) and tools from any **MCP servers** you connect
-  (stdio or SSE) — manage them with `m` on the dashboard or Ctrl+G in chat.
+  (stdio or SSE) — manage them with `m` on the dashboard or Ctrl+G in chat. Tool calling is
+  native-first with a prompted-protocol fallback, so it works across models (Qwen, Gemma,
+  Nemotron, GPT-OSS, MiniMax, Step, …).
+- **Code in a folder**: set a project's **working directory** (`+ Project` / Ctrl+E) and the
+  model gets file tools — `read` / `write` / `edit` / `delete` / `run_command` — scoped to
+  that folder (paths can't escape it), with an **approve / deny prompt** before anything
+  mutating. It reads `AGENTS.md` first if present.
+- **Skills**: pick a `SKILL.md` instruction set per chat — bundled platform skills, your own
+  **custom** ones, or installed **BMAD** skills; browse/create/install with `k`.
+- **Plan mode**: a per-chat toggle that makes the model produce a plan for you to approve
+  instead of taking action.
+- **Context bar**: a live token-usage meter showing how much of the model's context window the
+  conversation uses.
 - **Dependency self-check**: detects missing `mlx_lm.server` / `mlx_vlm.server` and offers
   to install either (`p` on the dashboard).
 - **Global install**: run it from anywhere like `claude`.
