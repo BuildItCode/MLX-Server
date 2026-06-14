@@ -6,9 +6,9 @@ shell-split and appended verbatim.
 
 `mlx_lm.server` and `mlx_vlm.server` take *different* flag sets — passing an
 mlx-lm-only flag (e.g. `--temp`, `--max-tokens`, `--pipeline`) to mlx-vlm makes
-its argparse abort. So the flag tables are gated per engine; mlx-vlm-specific
-tuning (`--kv-bits`, `--max-kv-size`, `--enable-thinking`, …) rides through the
-Custom params box, where those flags are native."""
+its argparse abort. So the flag tables are gated per engine: mlx-vlm gets its own
+native quantized-KV-cache flags (`--kv-bits`, `--max-kv-size`, …); anything still
+without a field (e.g. `--enable-thinking`) rides through the Custom params box."""
 
 from __future__ import annotations
 
@@ -45,6 +45,16 @@ _MLX_LM_VALUE_FLAGS: list[tuple[str, str]] = [
     ("prompt_concurrency", "--prompt-concurrency"),
 ]
 
+# Value-bearing flags accepted only by `mlx_vlm.server` — quantized KV cache
+# (context). mlx_lm.server has none of these. Verified against `--help`.
+_MLX_VLM_VALUE_FLAGS: list[tuple[str, str]] = [
+    ("kv_bits", "--kv-bits"),
+    ("kv_quant_scheme", "--kv-quant-scheme"),
+    ("kv_group_size", "--kv-group-size"),
+    ("max_kv_size", "--max-kv-size"),
+    ("quantized_kv_start", "--quantized-kv-start"),
+]
+
 # (config field, store-true flag), gated per engine.
 _SHARED_BOOL_FLAGS: list[tuple[str, str]] = [
     ("trust_remote_code", "--trust-remote-code"),
@@ -59,8 +69,8 @@ def _tables(engine: str) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
     """(value-flag table, bool-flag table) for an engine."""
     if engine == "mlx-vlm":
         # mlx-vlm shares model/adapter/host/port/draft-model/log-level + trust
-        # remote code. KV-cache / thinking flags go via custom_params.
-        return _SHARED_VALUE_FLAGS, _SHARED_BOOL_FLAGS
+        # remote code, plus its own native quantized-KV-cache flags.
+        return _SHARED_VALUE_FLAGS + _MLX_VLM_VALUE_FLAGS, _SHARED_BOOL_FLAGS
     return (
         _SHARED_VALUE_FLAGS + _MLX_LM_VALUE_FLAGS,
         _SHARED_BOOL_FLAGS + _MLX_LM_BOOL_FLAGS,

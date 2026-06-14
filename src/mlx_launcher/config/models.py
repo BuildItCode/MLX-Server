@@ -46,6 +46,14 @@ class ServerConfig(BaseModel):
     prompt_cache_size: Optional[int] = None
     prompt_cache_bytes: Optional[str] = None  # e.g. "2GB"
 
+    # Quantized KV cache — shrinks context memory. mlx-vlm ONLY: mlx_lm.server
+    # (0.31.3) has no such flags, so these are emitted only for the mlx-vlm engine.
+    kv_bits: Optional[str] = None            # bits for KV quantization, e.g. "8", "4", "3.5"
+    kv_quant_scheme: Optional[str] = None    # "uniform" | "turboquant"
+    kv_group_size: Optional[int] = None      # group size for uniform quantization (e.g. 64)
+    max_kv_size: Optional[int] = None        # cap the KV cache (context) at N tokens
+    quantized_kv_start: Optional[int] = None  # token index at which to start quantizing
+
     # Misc server flags
     trust_remote_code: bool = False
     log_level: LogLevel = "INFO"

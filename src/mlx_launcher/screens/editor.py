@@ -33,8 +33,8 @@ _LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 _ENGINE_HINTS = {
     "mlx-lm": "Text LLMs via mlx_lm.server. The sampling & cache fields below apply.",
     "mlx-vlm": (
-        "Vision-language models via mlx_vlm.server. Sampling is per-request — put "
-        "--kv-bits / --max-kv-size / --enable-thinking in the Custom tab."
+        "Vision-language models via mlx_vlm.server. Sampling is per-request; set the "
+        "quantized KV cache in Advanced; put --enable-thinking in the Custom tab."
     ),
 }
 
@@ -107,6 +107,26 @@ class EditorScreen(Screen):
                         with Vertical(classes="col"):
                             yield Label("Prompt cache bytes")
                             yield Input(id="prompt_cache_bytes", placeholder="e.g. 2GB")
+                    yield Label(
+                        "Quantized KV cache — shrinks context memory · mlx-vlm only",
+                        classes="hint",
+                    )
+                    with Horizontal(classes="row"):
+                        with Vertical(classes="col"):
+                            yield Label("KV bits")
+                            yield Input(id="kv_bits", placeholder="off · try 8, 4, or 3.5")
+                        with Vertical(classes="col"):
+                            yield Label("Quant scheme")
+                            yield Input(id="kv_quant_scheme", placeholder="uniform | turboquant")
+                    with Horizontal(classes="row"):
+                        with Vertical(classes="col"):
+                            yield Label("Max KV size (tokens)")
+                            yield Input(id="max_kv_size", placeholder="e.g. 8192")
+                        with Vertical(classes="col"):
+                            yield Label("KV group size")
+                            yield Input(id="kv_group_size", placeholder="64")
+                    yield Label("Quantized KV start (token index)")
+                    yield Input(id="quantized_kv_start", placeholder="e.g. 0")
                     yield Label("Log level")
                     yield Select(
                         [(lvl, lvl) for lvl in _LOG_LEVELS],
@@ -150,10 +170,11 @@ class EditorScreen(Screen):
                 with TabPane("Custom", id="tab-custom"):
                     yield Label("Custom params — appended to the command line verbatim.")
                     yield Label(
-                        "Quantized KV cache / context size live here, e.g.  --kv-bits 4 --max-kv-size 8192",
+                        "For flags without a field above (e.g. mlx-vlm --enable-thinking). "
+                        "Quantized KV cache now has fields in Advanced.",
                         classes="hint",
                     )
-                    yield Input(id="custom_params", placeholder="--kv-bits 4 --max-kv-size 8192")
+                    yield Input(id="custom_params", placeholder="--enable-thinking")
                     yield Label("", id="cmd-preview", classes="preview")
         with Horizontal(id="buttons"):
             yield Button("Save", id="save", variant="primary")
@@ -190,6 +211,11 @@ class EditorScreen(Screen):
         text("adapter_path", s.adapter_path)
         text("prompt_cache_size", s.prompt_cache_size)
         text("prompt_cache_bytes", s.prompt_cache_bytes)
+        text("kv_bits", s.kv_bits)
+        text("kv_quant_scheme", s.kv_quant_scheme)
+        text("kv_group_size", s.kv_group_size)
+        text("max_kv_size", s.max_kv_size)
+        text("quantized_kv_start", s.quantized_kv_start)
         text("draft_model", s.draft_model)
         text("num_draft_tokens", s.num_draft_tokens)
         text("allowed_origins", s.allowed_origins)
@@ -245,6 +271,15 @@ class EditorScreen(Screen):
                 json.loads(cta)
             except json.JSONDecodeError:
                 raise ValueError("chat template args must be valid JSON")
+        kv_bits = opt_str("kv_bits")
+        if kv_bits is not None:
+            try:
+                float(kv_bits)
+            except ValueError:
+                raise ValueError("KV bits must be a number (e.g. 8, 4, or 3.5)")
+        kv_scheme = opt_str("kv_quant_scheme")
+        if kv_scheme and kv_scheme not in ("uniform", "turboquant"):
+            raise ValueError("KV quant scheme must be 'uniform' or 'turboquant'")
 
         kwargs = dict(
             name=name,
@@ -260,6 +295,11 @@ class EditorScreen(Screen):
             adapter_path=opt_str("adapter_path"),
             prompt_cache_size=opt_int("prompt_cache_size"),
             prompt_cache_bytes=opt_str("prompt_cache_bytes"),
+            kv_bits=kv_bits,
+            kv_quant_scheme=kv_scheme,
+            kv_group_size=opt_int("kv_group_size"),
+            max_kv_size=opt_int("max_kv_size"),
+            quantized_kv_start=opt_int("quantized_kv_start"),
             log_level=self.query_one("#log_level", Select).value,
             draft_model=opt_str("draft_model"),
             num_draft_tokens=opt_int("num_draft_tokens"),

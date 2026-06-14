@@ -72,6 +72,25 @@ def test_vlm_engine_keeps_shared_flags_and_custom_params():
     assert args[-5:] == ["--kv-bits", "4", "--max-kv-size", "8192", "--enable-thinking"]
 
 
+def test_kv_cache_quantization_is_mlx_vlm_only():
+    # mlx_vlm.server natively supports quantized KV cache (context); mlx_lm.server
+    # has no such flags, so the same fields must NOT be emitted for mlx-lm (passing
+    # --kv-bits to mlx_lm.server would make its argparse abort).
+    fields = dict(
+        kv_bits="3.5", kv_quant_scheme="turboquant", kv_group_size=64,
+        max_kv_size=8192, quantized_kv_start=0,
+    )
+    vlm = build_args(ServerConfig(engine="mlx-vlm", model="/m", **fields))
+    assert vlm[vlm.index("--kv-bits") + 1] == "3.5"  # preserved exactly, incl. 3.5
+    assert vlm[vlm.index("--kv-quant-scheme") + 1] == "turboquant"
+    assert vlm[vlm.index("--max-kv-size") + 1] == "8192"
+    assert "--kv-group-size" in vlm and "--quantized-kv-start" in vlm
+
+    lm = build_args(ServerConfig(engine="mlx-lm", model="/m", **fields))
+    for flag in ("--kv-bits", "--kv-quant-scheme", "--kv-group-size", "--max-kv-size", "--quantized-kv-start"):
+        assert flag not in lm
+
+
 def test_preview_uses_engine_binary():
     assert preview_command(ServerConfig(model="/m")).startswith("mlx_lm.server")
     assert preview_command(ServerConfig(engine="mlx-vlm", model="/m")).startswith("mlx_vlm.server")
