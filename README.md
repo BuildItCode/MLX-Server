@@ -60,13 +60,19 @@ either for you.
 ## Install globally
 
 ```sh
-./install.sh        # uses pipx if available, else ~/.local/bin symlinks
+./install.sh        # installs pipx via Homebrew, then exposes mlxs globally
 mlxs                # then launch from anywhere
 ```
+
+On macOS the installer uses **Homebrew** (`brew install pipx`) for a clean, isolated global
+install. If you don't have Homebrew, it falls back to a local `.venv` + symlinks in
+`~/.local/bin` (no Homebrew required, but you'll want that dir on your `PATH`).
 
 ## Requirements
 
 - macOS on Apple Silicon, Python 3.10–3.14.
+- [**Homebrew**](https://brew.sh) — recommended. It's the easiest way to get Python on a Mac,
+  and `./install.sh` uses it to set up the global `mlxs` command (`brew install pipx`).
 - `mlx-lm` (provides `mlx_lm.server`, for text LLMs) and/or `mlx-vlm` (provides
   `mlx_vlm.server`, for vision-language models). Install whichever you need — the app can
   install either for you.
