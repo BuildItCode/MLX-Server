@@ -10,6 +10,31 @@ set -uo pipefail   # NB: no -e — a failed bootstrap step must fall through, no
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
 
+# Pick a Python that satisfies the launcher's requires-python (>=3.10,<3.15).
+# macOS's /usr/bin/python3 is usually 3.9 — too old for the launcher, and it also
+# forces ancient mlx-lm/mlx-vlm (the old mlx-vlm has no mlx_vlm.server at all). So
+# search for a modern interpreter explicitly instead of trusting bare `python3`.
+pick_python() {
+  local c
+  for c in python3.14 python3.13 python3.12 python3.11 python3.10 python3; do
+    command -v "$c" >/dev/null 2>&1 || continue
+    if "$c" -c 'import sys; sys.exit(0 if (3,10)<=sys.version_info<(3,15) else 1)' 2>/dev/null; then
+      command -v "$c"; return 0
+    fi
+  done
+  return 1
+}
+
+PYBIN="$(pick_python || true)"
+if [ -z "${PYBIN:-}" ]; then
+  echo "No suitable Python found (need 3.10–3.14)."
+  echo "Install one, then re-run ./install.sh, e.g.:"
+  echo "    brew install python@3.12        # Homebrew"
+  echo "    uv python install 3.12          # if you use uv"
+  exit 1
+fi
+echo "Using Python: $PYBIN ($("$PYBIN" --version 2>&1))"
+
 finish() {
   echo
   echo "Done. Start it from anywhere with:  mlxs"
@@ -17,10 +42,11 @@ finish() {
   exit 0
 }
 
-# 1) pipx already installed → use it.
+# 1) pipx already installed → use it. Pin the modern interpreter so pipx doesn't
+#    build the launcher's venv with an old system Python.
 if command -v pipx >/dev/null 2>&1; then
   echo "Installing globally with pipx ..."
-  if pipx install --force "$HERE"; then
+  if pipx install --force --python "$PYBIN" "$HERE"; then
     pipx ensurepath >/dev/null 2>&1 || true
     finish
   fi
@@ -35,13 +61,13 @@ else
     [[ "${ans:-Y}" =~ ^[Nn]$ ]] || brew install pipx || true
   fi
   if ! command -v pipx >/dev/null 2>&1; then
-    python3 -m pip install --user pipx >/dev/null 2>&1 \
-      || python3 -m pip install --user --break-system-packages pipx >/dev/null 2>&1 \
+    "$PYBIN" -m pip install --user pipx >/dev/null 2>&1 \
+      || "$PYBIN" -m pip install --user --break-system-packages pipx >/dev/null 2>&1 \
       || true
-    python3 -m pipx ensurepath >/dev/null 2>&1 || true
+    "$PYBIN" -m pipx ensurepath >/dev/null 2>&1 || true
   fi
   hash -r 2>/dev/null || true
-  if command -v pipx >/dev/null 2>&1 && pipx install --force "$HERE"; then
+  if command -v pipx >/dev/null 2>&1 && pipx install --force --python "$PYBIN" "$HERE"; then
     pipx ensurepath >/dev/null 2>&1 || true
     finish
   fi
@@ -52,7 +78,7 @@ fi
 set -e
 echo "Setting up a local venv ..."
 VENV="$HERE/.venv"
-[ -d "$VENV" ] || python3 -m venv "$VENV"
+[ -d "$VENV" ] || "$PYBIN" -m venv "$VENV"
 "$VENV/bin/python" -m pip install --quiet --upgrade pip
 "$VENV/bin/python" -m pip install --quiet -e "$HERE"
 

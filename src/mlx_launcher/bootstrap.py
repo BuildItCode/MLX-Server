@@ -27,8 +27,30 @@ def mlx_server_available(engine: str = "mlx-lm") -> bool:
     return find_mlx_server(engine) is not None
 
 
+def uv_available() -> bool:
+    return shutil.which("uv") is not None
+
+
+def engine_install_argv(package: str = "mlx-lm") -> list[str]:
+    """Argv to install an engine (mlx-lm / mlx-vlm / vllm-mlx) so its server
+    *console script* lands on PATH, where find_server_binary (shutil.which) looks.
+
+    Prefer `uv tool install`: it installs the engine in its own environment, picks
+    a modern managed Python (pinned to 3.12 — old Pythons resolve to ancient
+    mlx-vlm that has no mlx_vlm.server at all), and symlinks the scripts into
+    ~/.local/bin. A plain `pip install` into the launcher's own env doesn't work
+    here: under pipx the dependency's scripts aren't exposed, and under the
+    venv-fallback the venv bin isn't on PATH — so the engine installs yet still
+    reads as "not found".
+    """
+    if uv_available():
+        return ["uv", "tool", "install", "--python", "3.12", "--upgrade", package]
+    return pip_install_argv(package)
+
+
 def pip_install_argv(package: str = "mlx-lm") -> list[str]:
-    """Install into the *current* interpreter's environment."""
+    """Install into the *current* interpreter's environment. Fallback only — the
+    server script may not land on PATH (see engine_install_argv)."""
     return [sys.executable, "-m", "pip", "install", "--upgrade", package]
 
 

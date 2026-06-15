@@ -60,15 +60,15 @@ class SetupScreen(Screen):
 
     @on(Button.Pressed, "#install_mlx")
     def _install_mlx(self) -> None:
-        self.run_worker(self._run(bootstrap.pip_install_argv("mlx-lm")), exclusive=True)
+        self.run_worker(self._run(bootstrap.engine_install_argv("mlx-lm")), exclusive=True)
 
     @on(Button.Pressed, "#install_vlm")
     def _install_vlm(self) -> None:
-        self.run_worker(self._run(bootstrap.pip_install_argv("mlx-vlm")), exclusive=True)
+        self.run_worker(self._run(bootstrap.engine_install_argv("mlx-vlm")), exclusive=True)
 
     @on(Button.Pressed, "#install_vllm")
     def _install_vllm(self) -> None:
-        self.run_worker(self._run(bootstrap.pip_install_argv("vllm-mlx")), exclusive=True)
+        self.run_worker(self._run(bootstrap.engine_install_argv("vllm-mlx")), exclusive=True)
 
     @on(Button.Pressed, "#install_global")
     def _install_global(self) -> None:
