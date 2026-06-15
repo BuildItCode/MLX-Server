@@ -54,6 +54,7 @@ class Chat(BaseModel):
     tools: bool = False  # allow the model to call MCP server tools
     plan_mode: bool = False  # plan-only: produce a plan for approval, take no actions
     coding: bool = False  # senior-engineer persona + validate-your-work system prompt
+    subagent_ids: list[str] = Field(default_factory=list)  # legacy; kept for back-compat (unused)
     messages: list[ChatMessage] = Field(default_factory=list)
     created: float = Field(default_factory=_now)
     updated: float = Field(default_factory=_now)
@@ -84,6 +85,26 @@ class McpServer(BaseModel):
     url: str = ""  # sse: endpoint URL
 
 
+class Subagent(BaseModel):
+    """A named specialist agent with its own model + capabilities. Opened from the
+    subagents menu as a 50/50 side chat: its server loads when the chat opens and
+    unloads when it's closed. Its skills + system prompt seed the conversation, and
+    it may use web search / its selected MCP connections while you talk to it."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str = Field(default_factory=_new_id)
+    name: str = "subagent"  # display name shown in the subagents menu
+    server_id: Optional[str] = None  # the ServerConfig (model) it runs on
+    system_prompt: str = ""  # specialized instruction for this subagent
+    web_search: bool = False  # may call the built-in web_search tool
+    tools: bool = False  # may call its selected MCP connections
+    mcp_server_ids: list[str] = Field(default_factory=list)  # which MCP servers it uses
+    skill_ids: list[str] = Field(default_factory=list)  # skills injected into its prompt
+    relay: bool = True  # legacy; kept for back-compat (unused)
+    max_tokens: Optional[int] = None  # per-subagent budget; else profile/global default
+
+
 class ChatStoreFile(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -91,3 +112,4 @@ class ChatStoreFile(BaseModel):
     projects: list[Project] = Field(default_factory=list)
     chats: list[Chat] = Field(default_factory=list)
     mcp_servers: list[McpServer] = Field(default_factory=list)
+    subagents: list[Subagent] = Field(default_factory=list)

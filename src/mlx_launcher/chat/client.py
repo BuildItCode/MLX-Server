@@ -162,13 +162,43 @@ class HarmonyParser:
         return hold
 
 
+_STRIPPED_LEAD_RE = re.compile(r"\s*(?:analysis|commentary)(?=\S)")
+
+
+def recover_stripped_harmony(text: str) -> Optional[tuple[str, str]]:
+    """Some servers decode gpt-oss Harmony with the ``<|...|>`` control tokens removed
+    but the channel/role NAMES left glued inline, e.g.
+        ``analysis{reasoning}assistantfinal{answer}``
+    so the reasoning leaks into the answer. Recover (content, reasoning) from that,
+    or return None when the text isn't that shape (so normal prose is untouched)."""
+    if not text or "<|" in text:  # literal-token form → HarmonyParser handles it
+        return None
+    has_lead = bool(_STRIPPED_LEAD_RE.match(text))
+    # 'assistantfinal' glued is unambiguous; allow a single space only with a lead name
+    m = re.search(r"assistant ?final", text) if has_lead else re.search(r"assistantfinal", text)
+    if m:
+        reason = _STRIPPED_LEAD_RE.sub("", text[:m.start()], count=1)
+        return text[m.end():].strip(), reason.strip()
+    if has_lead:  # leading channel name, no assistant marker → split on a glued 'final'
+        fm = re.search(r"final(?=\S)", text)
+        if fm and fm.start() > 0:
+            reason = _STRIPPED_LEAD_RE.sub("", text[:fm.start()], count=1)
+            return text[fm.end():].strip(), reason.strip()
+    return None
+
+
 def parse_harmony(text: str) -> tuple[str, str]:
     """One-shot: split a full Harmony string into (final_content, reasoning).
-    Returns (text, "") unchanged when there is no Harmony markup."""
+    Handles both the literal ``<|channel|>`` form and the token-stripped
+    ``analysis…assistantfinal…`` form. Returns (text, "") for plain prose."""
     p = HarmonyParser()
     pieces = p.feed(text) + p.flush()
     content = "".join(t for k, t in pieces if k == "content")
     reason = "".join(t for k, t in pieces if k == "reason")
+    if "<|" not in (text or ""):  # no real control tokens — maybe the stripped form
+        stripped = recover_stripped_harmony(text or "")
+        if stripped is not None:
+            return stripped
     return content, reason
 
 
@@ -220,6 +250,35 @@ def parse_harmony_tool_calls(text: str) -> list[dict]:
     out: list[dict] = []
     for m in _HARMONY_CALL_RE.finditer(text or ""):
         out.append({"name": m.group("name"), "arguments": _loads_lenient(m.group("args"))})
+    return out
+
+
+# Last-resort recovery: a known tool name immediately followed by a JSON object, for
+# servers that strip the Harmony delimiters. gpt-oss on mlx_lm can leave its call as
+# e.g.  "…Use web_search function.{\"query\": …}"  with no <|call|> token to match.
+_LOOSE_BRIDGE = re.compile(r"[\s.:=)\"'`a-zA-Z_]{0,40}\{")
+
+
+def recover_loose_tool_calls(text: str, tool_names: list[str]) -> list[dict]:
+    """[{name, arguments}] for any KNOWN tool name followed closely by a parseable
+    JSON object. Deliberately conservative — a short, word/punctuation-only bridge to
+    the `{`, known names only, and the JSON must actually parse — so ordinary prose
+    that merely mentions a tool isn't misread as a call. Empty list when nothing fits."""
+    text = text or ""
+    out: list[dict] = []
+    for name in tool_names:
+        if not name:
+            continue
+        idx = text.find(name)
+        if idx == -1:
+            continue
+        tail = text[idx + len(name):]
+        bridge = _LOOSE_BRIDGE.match(tail)
+        if bridge is None:
+            continue
+        obj = _loads_lenient(tail[bridge.end() - 1:])  # from the '{'
+        if obj:
+            out.append({"name": name, "arguments": obj})
     return out
 
 

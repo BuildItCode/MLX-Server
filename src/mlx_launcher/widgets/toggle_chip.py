@@ -41,6 +41,10 @@ class ToggleChip(Static):
     def value(self) -> bool:
         return self._on
 
+    @property
+    def key(self) -> str:
+        return self._key
+
     def set_value(self, value: bool) -> None:
         """Set state programmatically (no Changed posted)."""
         self._on = bool(value)

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..config.store import config_dir
-from .models import Chat, ChatStoreFile, McpServer, Project
+from .models import Chat, ChatStoreFile, McpServer, Project, Subagent
 
 
 def chats_path() -> Path:
@@ -88,6 +88,25 @@ def upsert_mcp(data: ChatStoreFile, server: McpServer) -> None:
 
 def delete_mcp(data: ChatStoreFile, server_id: str) -> None:
     data.mcp_servers = [s for s in data.mcp_servers if s.id != server_id]
+
+
+def get_subagent(data: ChatStoreFile, sub_id: str) -> Optional[Subagent]:
+    return next((s for s in data.subagents if s.id == sub_id), None)
+
+
+def upsert_subagent(data: ChatStoreFile, sub: Subagent) -> None:
+    for i, s in enumerate(data.subagents):
+        if s.id == sub.id:
+            data.subagents[i] = sub
+            return
+    data.subagents.append(sub)
+
+
+def delete_subagent(data: ChatStoreFile, sub_id: str) -> None:
+    data.subagents = [s for s in data.subagents if s.id != sub_id]
+    for c in data.chats:  # detach from every chat so no dangling ids remain
+        if sub_id in c.subagent_ids:
+            c.subagent_ids = [x for x in c.subagent_ids if x != sub_id]
 
 
 def chats_in(data: ChatStoreFile, project_id: Optional[str]) -> list[Chat]:

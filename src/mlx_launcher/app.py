@@ -56,6 +56,15 @@ class MlxLauncherApp(App):
     #sidebar-buttons { height: auto; padding: 1 0 0 0; }
     #sidebar-buttons Button { width: 1fr; margin: 0 0 1 0; }
     #chat-main { width: 1fr; }
+    /* two side-by-side conversation panes (main + optional subagent side chat) */
+    #panes { height: 1fr; }
+    .pane { width: 1fr; border-top: solid $panel; }
+    .pane.active { border-top: solid $accent; }
+    #side-pane { border-left: solid $panel; }
+    #side-head { height: auto; padding: 0 1; }
+    #side-title { width: 1fr; padding: 1 0 0 0; color: $secondary; text-style: bold; }
+    #side-head Button { width: auto; min-width: 10; margin: 0 0 0 1; }
+    #side-transcript { height: 1fr; padding: 0 1; }
     #chat-topbar { height: auto; padding: 0 1; }
     #chat-title { width: 1fr; padding: 1 0 0 0; }
     #server-select { width: 34; }
@@ -97,6 +106,8 @@ class MlxLauncherApp(App):
     .msg-user .msg-role { color: $accent; text-align: right; }
     .msg-user .msg-body { width: auto; }
     .msg-stats { width: 1fr; color: $text-muted; padding: 1 0 0 0; }
+    .msg-copy { width: auto; color: $text-muted; padding: 0; margin: 0 0 0 0; }
+    .msg-copy:hover { color: $accent; text-style: bold; }
     /* copyable code blocks */
     .code-block { height: auto; width: 1fr; margin: 1 0; border: round $panel; }
     .code-head { height: 1; width: 1fr; background: $panel; }
@@ -107,6 +118,24 @@ class MlxLauncherApp(App):
     .msg-tool { width: auto; border-left: solid $warning; }
     .msg-tool .msg-role { color: $warning; }
     .msg-tool .msg-body { width: auto; }
+    /* subagents dropdown (modal): one row per subagent with compact Chat/Edit/× actions */
+    #sa-modal-list { height: auto; max-height: 16; padding: 1 0; }
+    .sa-modal-row { height: 1; align-vertical: middle; margin: 0 0 1 0; }
+    .sa-modal-name { width: 1fr; height: 1; padding: 0 1 0 0; }
+    .sa-modal-row Button { height: 1; min-width: 8; margin: 0 0 0 1; border: none; }
+    .sa-modal-row .sa-del { min-width: 5; }
+    .sa-modal-row .sa-chat { background: $success; color: $background; text-style: bold; }
+    .sa-modal-row .sa-edit { background: $panel; color: $text; }
+    .sa-modal-row .sa-del { background: $panel; color: $text-muted; }
+    .sa-modal-row .sa-chat:hover { background: $success-lighten-1; }
+    .sa-modal-row .sa-edit:hover, .sa-modal-row .sa-del:hover { background: $primary; color: $background; }
+    /* subagent editor */
+    #subagent-form { height: 1fr; padding: 0 1; }
+    #sa-prompt { height: 8; border: round $panel; }
+    #sa-mcp, #sa-skills { height: auto; }
+    .chip-row { height: 1; }
+    #subagent-buttons { height: auto; padding: 1 0; }
+    #subagent-buttons Button { margin: 0 1 0 0; }
     #mcp-list { height: 1fr; border: round $panel; }
     #mcp-form { height: auto; padding: 0 1; }
     #mcp-buttons { height: auto; padding: 1 0; }
@@ -123,7 +152,7 @@ class MlxLauncherApp(App):
     #p-instructions { height: 10; border: round $panel; }
     #project-buttons { height: auto; padding: 1 0; }
     #project-buttons Button { margin: 0 1 0 0; }
-    TextPromptModal, ConfirmModal, PermissionModal, ConnectorsModal { align: center middle; background: $background 60%; }
+    TextPromptModal, ConfirmModal, PermissionModal, ConnectorsModal, SubagentsModal { align: center middle; background: $background 60%; }
     #modal-box { width: 64; height: auto; padding: 1 2; border: round $primary; background: $surface; }
     #modal-buttons { height: auto; padding: 1 0 0 0; }
     #modal-buttons Button { margin: 0 1 0 0; }

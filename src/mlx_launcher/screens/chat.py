@@ -48,8 +48,10 @@ from ..chat.client import (
     parse_harmony,
     parse_harmony_tool_calls,
     prepend_system,
+    recover_loose_tool_calls,
+    recover_stripped_harmony,
 )
-from ..chat.models import Attachment, Chat, ChatMessage, Project
+from ..chat.models import Attachment, Chat, ChatMessage, Project, Subagent
 from ..config.models import ServerConfig
 from ..server import discovery
 from ..server.manager import BinaryNotFound, PortInUse, ServerStatus
@@ -296,6 +298,112 @@ class ChatItem(ListItem):
         self.chat_id = chat.id
 
 
+# MLX model-server runtime failures (e.g. an attention/KV `[reshape]` mismatch, OOM, a
+# shape/broadcast error) — these come from the model engine, NOT the `tools` param, so
+# retrying the request in prompted-tools mode just fails again after another long wait.
+_FATAL_GEN_MARKERS = ("reshape", "out of memory", "shape (", "broadcast")
+
+
+def _is_fatal_generation_error(exc: Exception) -> bool:
+    """True for a model-server generation failure that prompted-mode can't rescue."""
+    s = str(exc).lower()
+    return any(k in s for k in _FATAL_GEN_MARKERS)
+
+
+# When a tool loop runs out of iterations still calling tools (the model never wrote a
+# final answer — e.g. it kept re-searching), we make ONE more turn with no tools and
+# this nudge, so the user gets a real answer instead of "(no answer)".
+_WRAP_UP_PROMPT = ("Now answer my question using the information gathered above. "
+                   "Do NOT call any more tools — give your best final answer.")
+
+
+class SubagentsModal(ModalScreen[Optional[str]]):
+    """The subagents dropdown: pick a specialist to open as a side chat, or manage
+    the list (new / edit / delete). Dismisses with a subagent id to start a side
+    chat with it, or None."""
+
+    BINDINGS = [Binding("escape", "close", "Close")]
+
+    def __init__(self, data) -> None:
+        super().__init__()
+        self._data = data
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="modal-box"):
+            yield Label("[b]Subagents[/]  ·  open a specialist in a side chat")
+            yield VerticalScroll(id="sa-modal-list")
+            with Horizontal(id="modal-buttons"):
+                yield Button("+ New", id="sa-modal-new", variant="primary")
+                yield Button("Close", id="sa-modal-close")
+
+    def on_mount(self) -> None:
+        self._rebuild()
+
+    def on_screen_resume(self) -> None:
+        # back from the editor → reflect any new/edited subagent
+        self._data.subagents = store.load().subagents
+        self._rebuild()
+
+    def _server_name(self, sid: Optional[str]) -> str:
+        cfg = next((s for s in self.app.config.servers if s.id == sid), None) if sid else None
+        return cfg.name if cfg else "no model"
+
+    def _rebuild(self) -> None:
+        lst = self.query_one("#sa-modal-list", VerticalScroll)
+        lst.remove_children()
+        if not self._data.subagents:
+            lst.mount(Label(plain("No subagents yet — + New to create one."), classes="hint"))
+            return
+        for sub in self._data.subagents:
+            name = Static(Content.assemble((sub.name, "bold"), "  ", (self._server_name(sub.server_id), "dim")),
+                          classes="sa-modal-name")
+            chat_btn = Button("Chat", variant="success", classes="sa-chat")
+            edit_btn = Button("Edit", classes="sa-edit")
+            del_btn = Button("✕", classes="sa-del")
+            for b in (chat_btn, edit_btn, del_btn):
+                b._sa_id = sub.id  # widget ids can't hold a uuid → carry it as an attribute
+            lst.mount(Horizontal(name, chat_btn, edit_btn, del_btn, classes="sa-modal-row"))
+
+    @on(Button.Pressed, ".sa-chat")
+    def _chat(self, event: Button.Pressed) -> None:
+        self.dismiss(getattr(event.button, "_sa_id", None))
+
+    @on(Button.Pressed, ".sa-edit")
+    def _edit(self, event: Button.Pressed) -> None:
+        from .subagent_editor import SubagentEditorScreen
+        sub = store.get_subagent(self._data, getattr(event.button, "_sa_id", ""))
+        if sub is not None:
+            self.app.push_screen(SubagentEditorScreen(sub))
+
+    @on(Button.Pressed, ".sa-del")
+    def _delete(self, event: Button.Pressed) -> None:
+        sub = store.get_subagent(self._data, getattr(event.button, "_sa_id", ""))
+        if sub is not None:
+            self.run_worker(self._delete_flow(sub), exclusive=True)
+
+    async def _delete_flow(self, sub: Subagent) -> None:
+        ok = await self.app.push_screen_wait(
+            ConfirmModal(f'Delete subagent "{sub.name}"?', confirm_label="Delete"))
+        if not ok:
+            return
+        store.delete_subagent(self._data, sub.id)
+        store.save(self._data)
+        self._rebuild()
+        self.notify("Subagent deleted")
+
+    @on(Button.Pressed, "#sa-modal-new")
+    def _new(self) -> None:
+        from .subagent_editor import SubagentEditorScreen
+        self.app.push_screen(SubagentEditorScreen())
+
+    @on(Button.Pressed, "#sa-modal-close")
+    def _close_btn(self) -> None:
+        self.dismiss(None)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class ChatScreen(Screen):
     BINDINGS = [
         Binding("escape", "back", "Back / Stop"),
@@ -306,6 +414,7 @@ class ChatScreen(Screen):
         Binding("ctrl+t", "theme", "Theme"),
         Binding("ctrl+g", "mcp", "MCP servers"),
         Binding("ctrl+k", "skills", "Skills"),
+        Binding("ctrl+b", "subagents", "Subagents"),
         Binding("ctrl+e", "edit_project", "Edit project"),
         Binding("d", "delete", "Delete"),
     ]
@@ -317,10 +426,19 @@ class ChatScreen(Screen):
         self.project_filter: Optional[str] = None
         self._initial_server = server_id  # when opened from a running server
         self._pending: list[Attachment] = []
-        self._cancel = False
-        self._streaming = False
+        # per-pane generation state — the main model and a subagent run on separate
+        # ports, so each pane streams independently; the Send/Stop button reflects the
+        # FOCUSED pane only (you can talk to one while the other is still answering).
+        self._gen = {"main": False, "side": False}      # is each pane generating
+        self._cancel_flags = {"main": False, "side": False}  # Stop requested per pane
         self._auto_approve_fs = False  # "approve all" for file/command ops this session
         self._prompted_servers: set[str] = set()  # servers whose native tools failed → prompted mode
+        # side chat: a second 50/50 pane holding a live conversation with a subagent
+        self._active_pane = "main"  # which pane the single input sends to ("main" | "side")
+        self._side_open = False
+        self._side_sub: Optional[Subagent] = None
+        self._side_cfg: Optional[ServerConfig] = None  # the (possibly port-bumped) profile it runs on
+        self._side_messages: list[ChatMessage] = []
 
     # --- layout ----------------------------------------------------------
 
@@ -337,11 +455,18 @@ class ChatScreen(Screen):
                     yield Button("+ Project", id="new-project")
                     yield Button("✕ Delete", id="delete-item")
             with Vertical(id="chat-main"):
-                with Horizontal(id="chat-topbar"):
-                    yield Static("", id="chat-title")
-                    yield Select([], id="skill-select", prompt="skill", allow_blank=True)
-                    yield Select([], id="server-select", prompt="server", allow_blank=True)
-                yield VerticalScroll(id="transcript")
+                with Horizontal(id="panes"):
+                    with Vertical(id="main-pane", classes="pane active"):
+                        with Horizontal(id="chat-topbar"):
+                            yield Static("", id="chat-title")
+                            yield Select([], id="skill-select", prompt="skill", allow_blank=True)
+                            yield Select([], id="server-select", prompt="server", allow_blank=True)
+                        yield VerticalScroll(id="transcript")
+                    with Vertical(id="side-pane", classes="pane hidden"):
+                        with Horizontal(id="side-head"):
+                            yield Static("", id="side-title")
+                            yield Button("✕ Close", id="side-close", variant="error")
+                        yield VerticalScroll(id="side-transcript")
                 with Horizontal(id="chat-toggles"):
                     yield Static("", id="context-bar", classes="ctx-bar")
                 with Horizontal(id="chat-actions"):
@@ -355,6 +480,7 @@ class ChatScreen(Screen):
                     yield ToggleChip("coding", "coding", id="chip-coding")
                     yield ToggleChip("tools", "tools", id="chip-tools")
                     yield Static("connectors ▾", id="chip-connectors", classes="chip chip-action")
+                    yield Static("subagents ▾", id="chip-subagents", classes="chip chip-action")
                 yield Static("", id="attachments", classes="hidden")
                 yield Input(id="attach", placeholder="paste a file path, Enter to attach", classes="hidden")
                 with Horizontal(id="chat-inputrow"):
@@ -420,6 +546,142 @@ class ChatScreen(Screen):
             return
         for c in chats:
             lv.append(ChatItem(c, self._server_label_for(c)))
+
+    # --- subagents (side chat) -------------------------------------------
+
+    def action_subagents(self) -> None:
+        self._open_subagents_modal()
+
+    def _open_subagents_modal(self) -> None:
+        def _opened(sub_id: Optional[str]) -> None:
+            if not sub_id:
+                return
+            sub = store.get_subagent(self.data, sub_id)
+            if sub is not None:
+                self._open_side_chat(sub)
+        self.app.push_screen(SubagentsModal(self.data), _opened)
+
+    def _pane_of(self, widget) -> Optional[str]:
+        """Which pane a clicked widget belongs to ('main' | 'side'), or None."""
+        node = widget
+        while node is not None:
+            wid = getattr(node, "id", None)
+            if wid == "side-pane":
+                return "side"
+            if wid == "main-pane":
+                return "main"
+            node = node.parent
+        return None
+
+    def _set_active_pane(self, which: str) -> None:
+        """Route the single shared input to a pane, highlight it, and label the prompt."""
+        if which == "side" and not self._side_open:
+            which = "main"
+        self._active_pane = which
+        try:
+            self.query_one("#main-pane").set_class(which == "main", "active")
+            self.query_one("#side-pane").set_class(which == "side", "active")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            prompt = self.query_one("#prompt", PromptArea)
+            if which == "side" and self._side_sub is not None:
+                prompt.border_title = f"↦ {self._side_sub.name} · Enter to send"
+            else:
+                prompt.border_title = "Enter to send · Shift+Enter for newline"
+        except Exception:  # noqa: BLE001
+            pass
+        self._sync_send_button()  # the button shows THIS pane's Send/Stop state
+
+    def _side_cfg_for(self, base_cfg: ServerConfig) -> ServerConfig:
+        """A copy of the subagent's profile on a port that won't collide with the main
+        model — so both can be loaded at once. Returns base_cfg unchanged when its own
+        port is already free and distinct; otherwise bumps to the next free port. All
+        profiles default to :8080, so a bump is the common case."""
+        reserved = {m.cfg.port for m in self.app.running_managers() if m.cfg.host == base_cfg.host}
+        main_cfg = self._server_by_id(self.chat.server_id) if (self.chat and self.chat.server_id) else None
+        if main_cfg is not None and main_cfg.host == base_cfg.host:
+            reserved.add(main_cfg.port)
+        port = base_cfg.port
+        if port in reserved or not discovery.is_port_free(base_cfg.host, port):
+            port = next((p for p in range(base_cfg.port + 1, base_cfg.port + 64)
+                         if p not in reserved and discovery.is_port_free(base_cfg.host, p)), base_cfg.port)
+        return base_cfg if port == base_cfg.port else base_cfg.model_copy(update={"port": port})
+
+    @work(exclusive=True, group="side-open")
+    async def _open_side_chat(self, sub: Subagent) -> None:
+        """Open a 50/50 side chat with `sub`: load its server on its own port (so the
+        main model stays loaded) and route the input to it."""
+        base_cfg = self._server_by_id(sub.server_id)
+        if base_cfg is None:
+            self.notify("This subagent has no model — edit it to choose one", severity="warning")
+            return
+        if self._side_open:
+            await self._close_side_chat(unload=True)  # one side chat at a time → replace
+        existing = self.app.get_manager(base_cfg.id)
+        reuse = existing is not None and existing.is_running
+        cfg = existing.cfg if reuse else self._side_cfg_for(base_cfg)
+
+        self.query_one("#side-pane").remove_class("hidden")
+        self._side_open = True
+        self._side_sub = sub
+        self._side_cfg = cfg
+        self._side_messages = []
+        self.query_one("#side-title", Static).update(
+            Content.assemble(("↦ " + sub.name, "bold"), "  ", (cfg.model or "", "dim")))
+        transcript = self.query_one("#side-transcript", VerticalScroll)
+        transcript.remove_children()
+        self._set_active_pane("side")
+        self.query_one("#prompt", PromptArea).focus()
+
+        if reuse:
+            await transcript.mount(Static(plain(f"● {sub.name} ready · {cfg.name} (already running)"), classes="hint"))
+            return
+        await transcript.mount(Static(
+            plain(f"Loading {cfg.name} on :{cfg.port} … model load can take a while."), classes="hint"))
+        for mgr in self._port_occupants(cfg):  # only same host:port — never the main on a distinct port
+            await mgr.stop()
+        await self._load_server(cfg)
+        mgr = self.app.get_manager(cfg.id)
+        if mgr is None or not mgr.is_running or mgr.status is not ServerStatus.READY:
+            if self._side_open and self._side_cfg is cfg:
+                await transcript.mount(Static(plain("✕ failed to load — close and try again."), classes="hint"))
+            return
+        if self._side_open and self._side_cfg is cfg:  # still the active side chat (not closed/replaced)
+            transcript.remove_children()
+            await transcript.mount(Static(plain(f"● {sub.name} ready · {cfg.model}"), classes="hint"))
+            self.query_one("#prompt", PromptArea).focus()
+
+    async def _close_side_chat(self, unload: bool = True) -> None:
+        """Close the side pane and (by default) unload the subagent's server."""
+        if not self._side_open:
+            return
+        cfg, sub = self._side_cfg, self._side_sub
+        self._cancel_flags["side"] = True  # stop any in-flight side reply
+        self._gen["side"] = False
+        self._side_open = False
+        self._side_sub = None
+        self._side_cfg = None
+        self._side_messages = []
+        try:
+            self.query_one("#side-pane").add_class("hidden")
+            self.query_one("#side-transcript", VerticalScroll).remove_children()
+        except Exception:  # noqa: BLE001
+            pass
+        self._set_active_pane("main")
+        if unload and cfg is not None:
+            mgr = self.app.get_manager(cfg.id)
+            if mgr is not None and mgr.is_running:
+                self.notify(f"Unloading {sub.name if sub else cfg.name} …")
+                try:
+                    await mgr.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    @on(Button.Pressed, "#side-close")
+    def _side_close_btn(self) -> None:
+        # _close_side_chat already cancels + stops the server
+        self.run_worker(self._close_side_chat(unload=True))
 
     # --- opening / creating ---------------------------------------------
 
@@ -510,12 +772,14 @@ class ChatScreen(Screen):
     def _effective_context(self) -> Optional[int]:
         """The context budget to meter against: the profile's configured cap
         (`--max-kv-size`) when set — what the user actually told the server to
-        use — bounded by the model's true max; else the model's max alone."""
+        use — bounded by the model's true max; else the model's max alone. Only
+        mlx-vlm / vllm-mlx accept `--max-kv-size`; mlx-lm can't cap context, so we
+        ignore a (stale) setting there and meter against the model's window."""
         if not self.chat:
             return None
         model_max = capabilities.context_window(self.chat.model)
         cfg = self._server_by_id(self.chat.server_id) if self.chat.server_id else None
-        setting = cfg.max_kv_size if cfg else None
+        setting = cfg.max_kv_size if (cfg and getattr(cfg, "engine", None) in ("mlx-vlm", "vllm-mlx")) else None
         if setting and model_max:
             return min(setting, model_max)
         return setting or model_max
@@ -549,15 +813,15 @@ class ChatScreen(Screen):
         body_widget = Static(body, classes="msg-body")
         return self._assemble_row(role_label, role_class, [body_widget], right=right), body_widget
 
-    async def _mount_thinking(self, transcript) -> Horizontal:
-        """Mount an animated 'thinking' bubble at the bottom of the transcript and
+    async def _mount_thinking(self, transcript, label: Optional[str] = None) -> Horizontal:
+        """Mount an animated 'thinking' bubble at the bottom of `transcript` and
         return its row so the caller can remove it once a reply/tool result lands."""
         row = self._assemble_row(
-            self._server_label_for(self.chat), "msg-assistant",
+            label or self._server_label_for(self.chat), "msg-assistant",
             [ThinkingIndicator(classes="msg-body thinking-indicator")],
         )
         await transcript.mount(row)
-        self._scroll_end()
+        self._scroll_widget(transcript)
         return row
 
     def _assistant_body_widgets(self, text: str) -> list:
@@ -574,11 +838,18 @@ class ChatScreen(Screen):
     def _stats_text(tps: float, tokens: int, elapsed: float) -> str:
         return f"↯ {tps:.1f} tok/s · {tokens} tok · {elapsed:.1f}s"
 
+    def _copy_control(self, text: str) -> Static:
+        """A clickable '⧉ Copy' affordance carrying the message text (read in on_click)."""
+        c = Static("⧉ Copy", classes="msg-copy")
+        c._copy_text = text or ""
+        return c
+
     def _message_widget(self, m: ChatMessage) -> Horizontal:
         if m.role == "assistant":
             widgets = self._assistant_body_widgets(m.text)
             if m.tps:
                 widgets.append(Static(self._stats_text(m.tps, m.n_tokens or 0, m.elapsed or 0.0), classes="msg-stats"))
+            widgets.append(self._copy_control(m.text))
             return self._assemble_row(self._server_label_for(self.chat), "msg-assistant", widgets)
         chips = "  ".join(f"{a.name or a.path} ({a.kind})" for a in m.attachments) if m.attachments else ""
         if m.text and chips:
@@ -606,6 +877,12 @@ class ChatScreen(Screen):
                 transcript.mount(self._think_widget(m.reasoning))
             transcript.mount(self._message_widget(m))
         self.call_after_refresh(self._scroll_end)
+
+    def _scroll_widget(self, w) -> None:
+        try:
+            w.scroll_end(animate=False)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _scroll_end(self) -> None:
         try:
@@ -635,7 +912,7 @@ class ChatScreen(Screen):
         cfg = self._server_by_id(event.value)
         if cfg is None:
             return
-        if self._streaming:
+        if self._gen.get("main", False):
             self.notify("Stop the current response before switching models", severity="warning")
             self._revert_server_select()
             return
@@ -674,6 +951,13 @@ class ChatScreen(Screen):
                 by_id[m.cfg.id] = m
         by_id.pop(cfg.id, None)  # never stop the model we're about to (re)use
         return list(by_id.values())
+
+    def _port_occupants(self, cfg: ServerConfig) -> list:
+        """Running managers ACTUALLY bound to cfg's host:port (excluding cfg). Unlike
+        _port_blockers it does NOT also stop the chat's main server — so a subagent on
+        its own port loads without unloading the main model."""
+        return [m for m in self.app.running_managers()
+                if m.cfg.id != cfg.id and m.cfg.host == cfg.host and m.cfg.port == cfg.port]
 
     async def _confirm_and_switch(self, cfg: ServerConfig) -> None:
         blockers = self._port_blockers(cfg)
@@ -775,9 +1059,23 @@ class ChatScreen(Screen):
         self._persist()
 
     def on_click(self, event: events.Click) -> None:
-        # the connectors chip is a plain Static, not a toggle → open the popup
-        if getattr(event.widget, "id", None) == "chip-connectors":
+        wid = getattr(event.widget, "id", None)
+        if wid == "chip-connectors":  # a plain Static, not a toggle → open the popup
             self.app.push_screen(ConnectorsModal(self.data))
+            return
+        if wid == "chip-subagents":
+            self._open_subagents_modal()
+            return
+        if event.widget is not None and event.widget.has_class("msg-copy"):
+            text = getattr(event.widget, "_copy_text", "")
+            if text:
+                self.app.copy_text(text)
+                self.notify("Copied to clipboard")
+        # clicking inside a pane focuses it → the single input sends there
+        if self._side_open and event.widget is not None:
+            pane = self._pane_of(event.widget)
+            if pane is not None:
+                self._set_active_pane(pane)
 
     @on(Button.Pressed, "#new-chat")
     def _new_chat_btn(self) -> None:
@@ -850,7 +1148,7 @@ class ChatScreen(Screen):
 
     @on(Button.Pressed, "#send")
     def _send_pressed(self) -> None:
-        if self._streaming:
+        if self._gen.get(self._active_pane, False):
             self.action_stop()
         else:
             self.action_send()
@@ -884,8 +1182,17 @@ class ChatScreen(Screen):
         except Exception:  # noqa: BLE001 — bar is best-effort
             pass
 
-    def _set_generating(self, on: bool) -> None:
-        self._streaming = on
+    def _set_generating(self, pane: str, on: bool) -> None:
+        self._gen[pane] = on
+        if on:
+            self._cancel_flags[pane] = False
+        if pane == self._active_pane:
+            self._sync_send_button()
+
+    def _sync_send_button(self) -> None:
+        """The single Send/Stop button reflects the FOCUSED pane's state, so the other
+        pane can keep generating without locking it."""
+        on = self._gen.get(self._active_pane, False)
         try:
             send = self.query_one("#send", Button)
             send.label = "■ Stop" if on else "Send"
@@ -893,18 +1200,23 @@ class ChatScreen(Screen):
         except Exception:  # noqa: BLE001
             pass
 
+    def _cancel_cb(self, pane: str):
+        return lambda: self._cancel_flags.get(pane, False)
+
     # --- actions ---------------------------------------------------------
 
     def action_back(self) -> None:
-        if self._streaming:
-            self._cancel = True
+        pane = self._active_pane
+        if self._gen.get(pane, False):  # Esc stops the focused pane's reply, not the screen
+            self._cancel_flags[pane] = True
             self.notify("Stopped")
             return
         self.app.pop_screen()
 
     def action_stop(self) -> None:
-        if self._streaming:
-            self._cancel = True
+        pane = self._active_pane
+        if self._gen.get(pane, False):
+            self._cancel_flags[pane] = True
 
     def action_new_chat(self) -> None:
         self._create_chat()
@@ -925,7 +1237,12 @@ class ChatScreen(Screen):
         self.app.push_screen(SkillsManagerScreen())
 
     def on_screen_resume(self) -> None:
-        # returning from a manager/editor: pick up new skills and project edits
+        # returning from a manager/editor: pick up new skills, subagents, project edits.
+        # Reload only the lists edited elsewhere — replacing self.data would detach
+        # self.chat from self.data.chats.
+        fresh = store.load()
+        self.data.subagents = fresh.subagents
+        self.data.mcp_servers = fresh.mcp_servers
         self._refresh_skills()
         self._refresh_projects()
         self._refresh_chats()
@@ -1002,7 +1319,7 @@ class ChatScreen(Screen):
             self.notify("Chat deleted")
 
     def action_regenerate(self) -> None:
-        if self._streaming:
+        if self._gen.get("main", False):
             self.notify("Still generating — Esc to stop", severity="warning")
             return
         if not self.chat or not self.chat.messages:
@@ -1016,7 +1333,7 @@ class ChatScreen(Screen):
         self._generate()
 
     def action_edit_last(self) -> None:
-        if self._streaming or not self.chat:
+        if self._gen.get("main", False) or not self.chat:
             return
         idx = next((i for i in range(len(self.chat.messages) - 1, -1, -1)
                     if self.chat.messages[i].role == "user"), None)
@@ -1081,9 +1398,36 @@ class ChatScreen(Screen):
         self.app.push_screen(ProjectEditorScreen(self.data, proj))
 
     def action_send(self) -> None:
-        if self._streaming:
-            self.notify("Still generating — Esc to stop", severity="warning")
+        pane = "side" if (self._active_pane == "side" and self._side_open) else "main"
+        if self._gen.get(pane, False):  # only THIS pane being busy blocks a send
+            self.notify("Still generating in this pane — Esc to stop", severity="warning")
             return
+        if pane == "side":
+            self._send_side()
+        else:
+            self._send_main()
+
+    def _send_side(self) -> None:
+        if not self._side_sub or not self._side_cfg:
+            self.notify("Side chat isn't ready yet", severity="warning")
+            return
+        prompt = self.query_one("#prompt", PromptArea)
+        text = prompt.text.strip()
+        if not text:
+            return
+        mgr = self.app.get_manager(self._side_cfg.id)
+        if mgr is None or not mgr.is_running:
+            self.notify("Subagent server isn't running — reopen its chat", severity="warning")
+            return
+        self._side_messages.append(ChatMessage(role="user", text=text))
+        prompt.load_text("")
+        transcript = self.query_one("#side-transcript", VerticalScroll)
+        row, _ = self._bubble("You", "msg-user", plain(text), right=True)
+        transcript.mount(row)
+        self.call_after_refresh(lambda: self._scroll_widget(transcript))
+        self._generate_side()
+
+    def _send_main(self) -> None:
         if not self.chat:
             return
         text = self.query_one("#prompt", PromptArea).text.strip()
@@ -1124,14 +1468,202 @@ class ChatScreen(Screen):
         else:
             await self._generate_stream()
 
-    async def _bridge_chat(self, client: ChatClient, messages: list, specs) -> Optional[dict]:
-        """A non-streaming completion that aborts within ~0.1s when the user hits
-        Stop (the raw call blocks for the whole response, so we poll _cancel and
-        cancel the request). Returns the response, or None if cancelled; bridge
-        errors propagate to the caller."""
+    # --- subagents (side chat) -------------------------------------------
+
+    @staticmethod
+    def _extract_text(data: dict) -> str:
+        msg = (data.get("choices") or [{}])[0].get("message") or {}
+        content, _ = parse_harmony(msg.get("content") or "")
+        return content
+
+    def _subagent_system(self, sub: Subagent) -> str:
+        parts = [p for p in (skills.instructions_for(sid) for sid in sub.skill_ids) if p]
+        if sub.system_prompt.strip():
+            parts.append(sub.system_prompt.strip())
+        return "\n\n---\n\n".join(parts)
+
+    def _side_openai_messages(self, sub: Subagent) -> list[dict]:
+        """The side conversation as OpenAI messages, seeded by the subagent's system
+        prompt (its skills + instructions). Text-only — attachments stay on the main."""
+        msgs: list[dict] = []
+        system = self._subagent_system(sub)
+        if system:
+            msgs.append({"role": "system", "content": system})
+        for m in self._side_messages:
+            msgs.append({"role": m.role, "content": m.text})
+        return msgs
+
+    @work
+    async def _generate_side(self) -> None:
+        """Answer the latest side-chat turn with the subagent's model: stream when it
+        has no tools, else run a compact tool loop (web_search + its MCP connections)."""
+        sub, cfg = self._side_sub, self._side_cfg
+        if sub is None or cfg is None:
+            return
+        transcript = self.query_one("#side-transcript", VerticalScroll)
+        client = ChatClient(cfg.base_url(), cfg.model,
+                            max_tokens=(sub.max_tokens or cfg.max_tokens or DEFAULT_MAX_TOKENS))
+        cancel = self._cancel_cb("side")
+        self._set_generating("side", True)
+        try:
+            if sub.web_search or (sub.tools and sub.mcp_server_ids):
+                await self._side_tool_turn(sub, client, transcript, cancel=cancel)
+            else:
+                msg = await self._stream_into(transcript, client, self._side_openai_messages(sub),
+                                              sub.name, show_reasoning=False, cancel=cancel)
+                self._side_messages.append(msg)
+        finally:
+            self._set_generating("side", False)
+            self._scroll_widget(transcript)
+
+    async def _side_tool_turn(self, sub: Subagent, client: ChatClient, transcript, *, cancel) -> None:
+        """One tool-using turn for the side chat: a single 'thinking' spinner while the
+        subagent searches / calls its MCP tools, then render + persist the answer."""
+        messages = self._side_openai_messages(sub)
+        thinking = await self._mount_thinking(transcript, sub.name)
+        t0 = time.monotonic()
+        try:
+            text = await self._subagent_tool_loop(sub, client, messages, cancel=cancel)
+        except Exception as exc:  # noqa: BLE001
+            text = f"▲ {exc}"
+            if _is_fatal_generation_error(exc):
+                text += ("\n\n*The model server failed to generate (this comes from MLX, not the "
+                         "launcher). It usually means this model + engine combo can't run — try "
+                         "switching the subagent's profile to the **mlx-lm** engine, picking a "
+                         "different model, or lowering its max-tokens / KV-cache settings.*")
+        try:
+            await thinking.remove()
+        except Exception:  # noqa: BLE001
+            pass
+        if text is None:  # Stop pressed
+            text = "(stopped)"
+        elapsed = time.monotonic() - t0
+        widgets = self._assistant_body_widgets(text)
+        widgets.append(Static(f"▸ {elapsed:.1f}s", classes="msg-stats"))
+        if text and not text.startswith(("(stopped)", "▲ ")):
+            widgets.append(self._copy_control(text))
+        await transcript.mount(self._assemble_row(sub.name, "msg-assistant", widgets))
+        self._side_messages.append(ChatMessage(role="assistant", text=text, elapsed=round(elapsed, 1)))
+        self._scroll_widget(transcript)
+
+    async def _exec_subagent_tool(self, name: str, args: dict, sessions: dict, router: dict) -> str:
+        try:
+            if name == "web_search":
+                return await chat_tools.run_web_search(args.get("query", ""), args.get("max_results", 6))
+            if name in router:
+                return await mcp_client.call_mcp(sessions, router, name, args)
+            return f"Unknown tool: {name}"
+        except Exception as exc:  # noqa: BLE001
+            return f"tool error: {exc}"
+
+    @staticmethod
+    def _subagent_tool_directive(sub: Subagent, specs: list) -> str:
+        """A system note that DESCRIBES the tools in the prompt and insists on using
+        them. Native `tools` are also sent, but many MLX servers (notably mlx-vlm)
+        silently ignore that param — then the model never sees the tool and answers
+        from memory, fabricating sources. Putting the tools (and a use-them rule) in
+        the prompt works regardless of native support."""
+        parts = [prompted_tools.tool_instructions(specs)]
+        if sub.web_search:
+            parts.append(
+                "IMPORTANT: when the user asks for current information, facts, statistics, "
+                "news, prices, or sources, you MUST call web_search first and base your answer "
+                "on the results. NEVER fabricate sources, URLs, citations, or data — if you "
+                "need a source, search for it and cite the URLs the tool returns."
+            )
+        return "\n\n".join(parts)
+
+    async def _subagent_tool_loop(self, sub: Subagent, client: ChatClient, messages: list[dict],
+                                  *, cancel=None) -> Optional[str]:
+        """Compact agentic loop for the side chat: web_search + the subagent's selected
+        MCP tools. The tools are described in the prompt AND offered natively, and we
+        accept native / harmony / text-protocol calls alike — so it works whether or not
+        the server supports the native `tools` param. Returns the answer, or None on Stop.
+        `messages` is the running conversation (mutated in place)."""
+        stopped = cancel or (lambda: False)
+        async with AsyncExitStack() as stack:
+            specs: list = []
+            if sub.web_search:
+                specs.append(chat_tools.web_search_spec())
+            sessions, router = {}, {}
+            if sub.tools and sub.mcp_server_ids:
+                # force-enable the subagent's chosen MCP servers (independent of the global
+                # Connectors toggle); reload from disk so edits in the MCP manager apply.
+                wanted = [s.model_copy(update={"enabled": True})
+                          for s in store.load().mcp_servers if s.id in sub.mcp_server_ids]
+                sessions, mcp_specs, router = await mcp_client.open_sessions(
+                    stack, wanted, on_error=lambda n, e: self.notify(f"MCP {n}: {e}", severity="warning"))
+                specs += mcp_specs
+            if specs:  # make the tools visible in the prompt + insist on using them
+                prepend_system(messages, self._subagent_tool_directive(sub, specs))
+            tool_names = [(s.get("function") or {}).get("name") for s in specs]
+            send_native = bool(specs)  # also offer them natively; drop on template rejection
+            data: dict = {}
+            n_calls = 0  # cap total tool calls so a runaway searcher can't loop forever
+            for _ in range(8):
+                if stopped():
+                    return None
+                if n_calls >= 8:
+                    break  # → wrap-up below forces a final answer
+                try:
+                    data = await self._bridge_chat(
+                        client, messages, specs if send_native else None, cancel=cancel)
+                except Exception as exc:  # template rejects the `tools` param → text protocol only
+                    if send_native and not _is_fatal_generation_error(exc):
+                        send_native = False
+                        continue
+                    raise
+                if data is None:
+                    return None
+                msg = (data.get("choices") or [{}])[0].get("message") or {}
+                raw = msg.get("content") or ""
+                tool_calls = msg.get("tool_calls") or []
+                content, reason = parse_harmony(raw)
+                harmony_calls = parse_harmony_tool_calls(raw) if not tool_calls else []
+                # text protocol (<tool_call>) or, last-resort, a stripped `name {json}`
+                text_calls = ((prompted_tools.parse_tool_calls(content)
+                               or recover_loose_tool_calls(content, tool_names))
+                              if (specs and not tool_calls and not harmony_calls) else [])
+                if not tool_calls and not harmony_calls and not text_calls:
+                    return prompted_tools.strip_tool_calls(content) or content
+                if tool_calls:  # native — echo as a tool-call turn, results as `tool` role
+                    messages.append({"role": "assistant", "content": content or None, "tool_calls": tool_calls})
+                    for call in tool_calls:
+                        fn = call.get("function") or {}
+                        try:
+                            args = json.loads(fn.get("arguments") or "{}")
+                        except json.JSONDecodeError:
+                            args = {}
+                        n_calls += 1
+                        result = await self._exec_subagent_tool(fn.get("name", ""), args, sessions, router)
+                        messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": result[:8000]})
+                else:  # harmony or text protocol — echo clean prose, results as user turns
+                    calls = harmony_calls or text_calls
+                    clean = prompted_tools.strip_tool_calls(content) or reason or "Calling tools."
+                    messages.append({"role": "assistant", "content": clean})
+                    for call in calls:
+                        n_calls += 1
+                        result = await self._exec_subagent_tool(call["name"], call["arguments"], sessions, router)
+                        messages.append({"role": "user", "content": prompted_tools.tool_response(call["name"], result[:8000])})
+            # ran out of iterations still calling tools → one no-tools turn for an answer
+            if stopped():
+                return None
+            messages.append({"role": "user", "content": _WRAP_UP_PROMPT})
+            data = await self._bridge_chat(client, messages, None, cancel=cancel)
+            if data is None:
+                return None
+            content, _ = parse_harmony((data.get("choices") or [{}])[0].get("message", {}).get("content") or "")
+            return prompted_tools.strip_tool_calls(content) or content
+
+    async def _bridge_chat(self, client: ChatClient, messages: list, specs, *, cancel=None) -> Optional[dict]:
+        """A non-streaming completion that aborts within ~0.1s when the user hits Stop
+        (the raw call blocks for the whole response, so we poll `cancel` and cancel the
+        request). Returns the response, or None if cancelled; bridge errors propagate to
+        the caller. `cancel` is a per-pane predicate (defaults to never-cancel)."""
+        stopped = cancel or (lambda: False)
         task = asyncio.ensure_future(client.bridge.chat(messages, tools=specs or None))
         while not task.done():
-            if self._cancel:
+            if stopped():
                 task.cancel()
                 try:
                     await task
@@ -1144,32 +1676,49 @@ class ChatScreen(Screen):
     async def _generate_stream(self) -> None:
         assert self.chat is not None
         transcript = self.query_one("#transcript", VerticalScroll)
+        client = self._client()
+        messages = build_openai_messages(self.chat, self._current_project(), self._skill_instructions())
+        self._set_generating("main", True)
+        msg = await self._stream_into(transcript, client, messages,
+                                      self._server_label_for(self.chat), show_reasoning=self.chat.reasoning,
+                                      cancel=self._cancel_cb("main"))
+        self.chat.messages.append(msg)
+        self.chat.updated = msg.ts
+        self._persist()
+        self._set_generating("main", False)
+        try:
+            self._refresh_chats()
+        except Exception:  # noqa: BLE001
+            pass
+        self._scroll_end()
+
+    async def _stream_into(self, transcript, client: ChatClient, messages: list, label: str,
+                           *, show_reasoning: bool, cancel=None) -> ChatMessage:
+        """Stream a completion into `transcript`, returning the assistant ChatMessage
+        (the caller persists it). Shared by the main chat and the subagent side chat;
+        honors the per-pane `cancel` predicate and recovers token-stripped Harmony leaks."""
+        stopped = cancel or (lambda: False)
         # The answer bubble animates ("Thinking…") until the first content token,
         # then we stop the spinner and stream the reply into the same widget.
         assistant_body = ThinkingIndicator(classes="msg-body thinking-indicator")
-        assistant_box = self._assemble_row(self._server_label_for(self.chat), "msg-assistant", [assistant_body])
+        assistant_box = self._assemble_row(label, "msg-assistant", [assistant_body])
         await transcript.mount(assistant_box)
         think_body: Optional[Static] = None
-
-        client = self._client()
-        messages = build_openai_messages(self.chat, self._current_project(), self._skill_instructions())
         reason_acc: list[str] = []
         content_acc: list[str] = []
         last_render = 0
         tokens = 0
         t_first: Optional[float] = None
         errored = False
-        self._cancel = False
-        self._set_generating(True)
         try:
-            async for kind, chunk in client.stream(messages, cancel=lambda: self._cancel):
+            async for kind, chunk in client.stream(messages, cancel=stopped):
                 if kind in ("reason", "content"):
                     if t_first is None:
                         t_first = time.monotonic()
                     tokens += 1
                 if kind == "reason":
                     reason_acc.append(chunk)
-                    if self.chat.reasoning:
+                    if show_reasoning:
                         if think_body is None:
                             think_box, think_body = self._bubble("◌ thinking", "msg-think", "")
                             await transcript.mount(think_box, before=assistant_box)
@@ -1183,7 +1732,7 @@ class ChatScreen(Screen):
                     if last_render == 0 or "\n" in chunk or len(joined) - last_render >= 24:
                         assistant_body.update(RichMarkdown(joined))
                         last_render = len(joined)
-                self._scroll_end()
+                self._scroll_widget(transcript)
         except Exception as exc:  # noqa: BLE001
             errored = True
             try:
@@ -1193,6 +1742,18 @@ class ChatScreen(Screen):
                 pass
 
         final = "".join(content_acc)
+        # Some gpt-oss servers strip the Harmony <|...|> tokens but leak the channel
+        # names ('analysis…assistantfinal…') into the stream — recover the clean answer
+        # and move the reasoning to the thinking panel.
+        if not errored:
+            recovered = recover_stripped_harmony(final)
+            if recovered is not None:
+                final, leaked_reason = recovered
+                if leaked_reason:
+                    reason_acc.append(leaked_reason)
+                    if show_reasoning and think_body is None:
+                        think_box, think_body = self._bubble("◌ thinking", "msg-think", plain(leaked_reason))
+                        await transcript.mount(think_box, before=assistant_box)
         elapsed = (time.monotonic() - t_first) if t_first else 0.0
         tps = (tokens / elapsed) if elapsed > 0 else 0.0
         if not errored:
@@ -1204,24 +1765,18 @@ class ChatScreen(Screen):
                     await bubble.mount(widget)
                 if tps > 0:
                     await bubble.mount(Static(self._stats_text(tps, tokens, elapsed), classes="msg-stats"))
+                await bubble.mount(self._copy_control(final))
             except Exception:  # noqa: BLE001
                 pass
-        self.chat.messages.append(ChatMessage(
+        self._scroll_widget(transcript)
+        return ChatMessage(
             role="assistant",
             text=final,
             reasoning="".join(reason_acc),
             tps=round(tps, 1) if tps > 0 else None,
             n_tokens=tokens or None,
             elapsed=round(elapsed, 1) if elapsed > 0 else None,
-        ))
-        self.chat.updated = self.chat.messages[-1].ts
-        self._persist()
-        self._set_generating(False)
-        try:
-            self._refresh_chats()
-        except Exception:  # noqa: BLE001
-            pass
-        self._scroll_end()
+        )
 
     async def _generate_tools(self) -> None:
         """Function-calling loop: offer web_search + connected MCP tools, execute the
@@ -1234,13 +1789,17 @@ class ChatScreen(Screen):
         if fs_root:
             # ONE leading system message only — see prepend_system (templates 500 on two)
             prepend_system(messages, fs_tools.system_note(fs_root))
-        self._cancel = False
-        self._set_generating(True)
+        cancel = self._cancel_cb("main")
+        self._set_generating("main", True)
         t0 = time.monotonic()
         n_calls = 0
         final_text = ""
         thinking = None  # the live "thinking…" bubble between turns (cleaned up below)
         max_iters = 24 if fs_root else 8
+        # cap web/MCP search loops so a model that keeps searching (some batch several
+        # web_search calls per turn) can't run away — then the wrap-up forces an answer.
+        # File tools (coding) legitimately make many calls, so they're uncapped.
+        max_tool_calls = None if fs_root else 8
         try:
             async with AsyncExitStack() as stack:
                 specs = []
@@ -1257,24 +1816,36 @@ class ChatScreen(Screen):
                         on_error=lambda name, err: self.notify(f"MCP {name}: {err}", severity="warning"),
                     )
                     specs += mcp_specs
-                # native function-calling, falling back to prompted tools (text protocol)
-                # for any model whose template rejects the `tools` param.
-                prompted = (self.chat.server_id or "") in self._prompted_servers
-                if prompted and specs:
+                tool_names = [(s.get("function") or {}).get("name") for s in specs]
+                # Describe the tools in the prompt (so the model SEES them even when the
+                # server silently ignores the native `tools` param — mlx-vlm, and mlx_lm
+                # with models it has no tool parser for) AND offer them natively. We accept
+                # native / harmony / <tool_call> / stripped calls alike. `prompted` only
+                # decides whether we keep SENDING the native param (dropped if it 500s).
+                if specs:
                     prepend_system(messages, prompted_tools.tool_instructions(specs))
+                prompted = (self.chat.server_id or "") in self._prompted_servers
                 for _ in range(max_iters):
-                    if self._cancel:
+                    if cancel():
                         break
+                    if max_tool_calls is not None and n_calls >= max_tool_calls:
+                        self.notify(f"Reached the {max_tool_calls}-search limit — answering with what I found",
+                                    severity="warning")
+                        break  # → wrap-up below forces a final answer
                     thinking = await self._mount_thinking(transcript)
                     if prompted:
-                        data = await self._bridge_chat(client, messages, None)
+                        data = await self._bridge_chat(client, messages, None, cancel=cancel)
                         await thinking.remove()
                         thinking = None
                         if data is None:  # stopped
                             break
                         msg = (data.get("choices") or [{}])[0].get("message") or {}
-                        content, _r = parse_harmony(msg.get("content") or "")
-                        calls = prompted_tools.parse_tool_calls(content) if specs else []
+                        raw = msg.get("content") or ""
+                        content, _r = parse_harmony(raw)
+                        # accept any signaling: <tool_call> text, harmony, or stripped name {json}
+                        calls = (prompted_tools.parse_tool_calls(content)
+                                 or parse_harmony_tool_calls(raw)
+                                 or recover_loose_tool_calls(content, tool_names)) if specs else []
                         if not calls:
                             final_text = prompted_tools.strip_tool_calls(content) or content
                             messages.append({"role": "assistant", "content": content})
@@ -1287,14 +1858,15 @@ class ChatScreen(Screen):
                         self._scroll_end()
                         continue
                     try:
-                        data = await self._bridge_chat(client, messages, specs)
+                        data = await self._bridge_chat(client, messages, specs, cancel=cancel)
                     except Exception as exc:  # native tools rejected → switch this server to prompted
                         await thinking.remove()
                         thinking = None
-                        if specs and not prompted:
-                            prompted = True
+                        # a fatal generation error (reshape/OOM) isn't a tools rejection —
+                        # don't waste another long retry in prompted mode; surface it now.
+                        if specs and not prompted and not _is_fatal_generation_error(exc):
+                            prompted = True  # stop sending the native param (tools already described up front)
                             self._prompted_servers.add(self.chat.server_id or "")
-                            prepend_system(messages, prompted_tools.tool_instructions(specs))
                             self.notify("Native tool-calling failed — using prompted tools for this model.",
                                         severity="warning", timeout=8)
                             continue
@@ -1309,18 +1881,25 @@ class ChatScreen(Screen):
                     tool_calls = msg.get("tool_calls") or []
                     content, reason = parse_harmony(raw)
                     # gpt-oss puts calls in the Harmony commentary channel; mlx_lm
-                    # returns them as text, not native tool_calls — recover them.
+                    # returns them as text, not native tool_calls — recover them. As a
+                    # last resort (stripped delimiters) recover a bare `name {json}`.
                     harmony_calls = parse_harmony_tool_calls(raw) if not tool_calls else []
-                    if not tool_calls and not harmony_calls:
+                    # a model following the prompt instructions emits <tool_call> text even
+                    # while we're sending native; catch that, then a stripped `name {json}`.
+                    other_calls = ((prompted_tools.parse_tool_calls(content)
+                                    or recover_loose_tool_calls(content, tool_names))
+                                   if (specs and not tool_calls and not harmony_calls) else [])
+                    if not tool_calls and not harmony_calls and not other_calls:
                         messages.append({"role": "assistant", "content": content})
                         final_text = content
                         break
-                    if harmony_calls:
+                    text_calls = harmony_calls or other_calls
+                    if text_calls:
                         # Echo a CLEAN assistant turn (raw Harmony tokens would nest
                         # channels and confuse the template), then feed each result
                         # back as a user message — the round-trip gpt-oss renders.
                         messages.append({"role": "assistant", "content": reason or content or "Calling tools."})
-                        for call in harmony_calls:
+                        for call in text_calls:
                             n_calls += 1
                             result = await self._exec_tool(call["name"], call["arguments"], sessions, router, transcript, fs_root)
                             messages.append({"role": "user", "content": prompted_tools.tool_response(call["name"], result[:8000])})
@@ -1337,6 +1916,23 @@ class ChatScreen(Screen):
                         result = await self._exec_tool(fn.get("name", ""), args, sessions, router, transcript, fs_root)
                         messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": result[:8000]})
                     self._scroll_end()
+            # ran out of iterations still calling tools but never answered → one more
+            # turn with NO tools so the user gets an answer, not "(no answer)".
+            if not final_text and not cancel() and n_calls > 0:
+                messages.append({"role": "user", "content": _WRAP_UP_PROMPT})
+                thinking = await self._mount_thinking(transcript)
+                try:
+                    data = await self._bridge_chat(client, messages, None, cancel=cancel)
+                finally:
+                    if thinking is not None:
+                        try:
+                            await thinking.remove()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        thinking = None
+                if data:
+                    content, _ = parse_harmony((data.get("choices") or [{}])[0].get("message", {}).get("content") or "")
+                    final_text = prompted_tools.strip_tool_calls(content) or content
         except Exception as exc:  # noqa: BLE001
             final_text = f"▲ {exc}"
         if thinking is not None:  # never leave a spinner spinning
@@ -1346,16 +1942,18 @@ class ChatScreen(Screen):
                 pass
 
         elapsed = time.monotonic() - t0
-        widgets = self._assistant_body_widgets(final_text or ("(stopped)" if self._cancel else "(no answer)"))
+        widgets = self._assistant_body_widgets(final_text or ("(stopped)" if cancel() else "(no answer)"))
         plural = "" if n_calls == 1 else "s"
         widgets.append(Static(f"▸ {n_calls} tool call{plural} · {elapsed:.1f}s", classes="msg-stats"))
+        if final_text:
+            widgets.append(self._copy_control(final_text))
         await transcript.mount(self._assemble_row(self._server_label_for(self.chat), "msg-assistant", widgets))
         self.chat.messages.append(
             ChatMessage(role="assistant", text=final_text, n_tokens=n_calls or None, elapsed=round(elapsed, 1))
         )
         self.chat.updated = self.chat.messages[-1].ts
         self._persist()
-        self._set_generating(False)
+        self._set_generating("main", False)
         try:
             self._refresh_chats()
         except Exception:  # noqa: BLE001

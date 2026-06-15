@@ -36,17 +36,21 @@ SYSTEM_NOTE = (
     "You have file tools scoped to this project's working directory:\n  {root}\n"
     "Use list_directory, read_file, write_file, edit_file, delete_path, and run_command "
     "to work in it. All paths are RELATIVE to the working directory.\n"
-    "BEFORE starting any task, check for an AGENTS.md file in the working directory "
-    "(read_file AGENTS.md) and follow its conventions and instructions if it exists.\n"
     "Inspect files before editing, make focused changes, and briefly explain what you did."
 )
 
 
 def system_note(root: str) -> str:
-    """The filesystem system prompt for `root`, flagging AGENTS.md when present."""
+    """The filesystem system prompt for `root`. The AGENTS.md guidance is gated on
+    whether the file actually exists, so the model never hunts for a missing one —
+    when there's none, it's told to answer directly."""
     note = SYSTEM_NOTE.format(root=root)
     if os.path.isfile(os.path.join(os.path.expanduser(root), "AGENTS.md")):
-        note += "\nNOTE: this project HAS an AGENTS.md — read it FIRST and follow it before anything else."
+        note += ("\nThis project HAS an AGENTS.md — read it FIRST (read_file AGENTS.md) and follow its "
+                 "conventions before doing anything else.")
+    else:
+        note += ("\nThere is no AGENTS.md here — do NOT look for one or try to read it; just respond "
+                 "to the request directly.")
     return note
 
 

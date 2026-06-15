@@ -67,13 +67,16 @@ def test_mutating_tools_are_the_write_ops():
     assert "list_directory" not in fs_tools.MUTATING_TOOLS
 
 
-def test_system_note_instructs_agents_md(tmp_path):
+def test_system_note_gates_agents_md_on_existence(tmp_path):
     root = str(tmp_path)
     note = fs_tools.system_note(root)
-    assert "AGENTS.md" in note and "read_file AGENTS.md" in note
-    assert "HAS an AGENTS.md" not in note  # none present yet
+    # none present → do NOT tell the model to read one; answer directly
+    assert "no AGENTS.md" in note and "directly" in note
+    assert "read_file AGENTS.md" not in note and "HAS an AGENTS.md" not in note
+    # once it exists → read it first
     (tmp_path / "AGENTS.md").write_text("be terse")
-    assert "HAS an AGENTS.md" in fs_tools.system_note(root)
+    note2 = fs_tools.system_note(root)
+    assert "HAS an AGENTS.md" in note2 and "read_file AGENTS.md" in note2
 
 
 def test_run_command_in_working_dir(tmp_path):
