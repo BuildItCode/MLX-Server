@@ -53,6 +53,7 @@ class Chat(BaseModel):
     web_search: bool = False  # allow the model to call the web_search tool
     tools: bool = False  # allow the model to call MCP server tools
     plan_mode: bool = False  # plan-only: produce a plan for approval, take no actions
+    coding: bool = False  # senior-engineer persona + validate-your-work system prompt
     messages: list[ChatMessage] = Field(default_factory=list)
     created: float = Field(default_factory=_now)
     updated: float = Field(default_factory=_now)

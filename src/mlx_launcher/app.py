@@ -60,19 +60,25 @@ class MlxLauncherApp(App):
     #chat-title { width: 1fr; padding: 1 0 0 0; }
     #server-select { width: 34; }
     #skill-select { width: 40; }
-    #reason-label { padding: 1 1 0 1; }
     #transcript { height: 1fr; padding: 0 1; }
     #attachments { height: auto; padding: 0 1; }
     #attach { margin: 0 1; }
-    #chat-actions { height: auto; padding: 0 1; }
+    #chat-actions { height: auto; padding: 0 1; align-vertical: middle; }
     #chat-actions Button { margin: 0 1 0 0; }
     #chat-inputrow { height: auto; padding: 0 1 1 1; }
     #prompt { width: 1fr; height: 6; border: round $panel; border-title-color: $accent; }
     #chat-inputrow Button { margin: 0 0 0 1; }
     #chat-toggles { height: auto; padding: 0 1; }
     .actions-spacer { width: 1fr; height: 1; }
-    .toggle-label { padding: 1 1 0 1; color: $text-muted; }
     .ctx-bar { width: auto; padding: 1 1 0 0; }
+    /* click-to-toggle chips (plan/reason/web/coding/tools) + connectors button */
+    .chip { width: auto; height: 1; padding: 0 1; margin: 0 1 0 0; color: $text-muted; background: $panel; }
+    .chip:hover { color: $text; }
+    .chip.-on { background: $accent; color: $background; text-style: bold; }
+    .chip.-disabled { color: #555; }
+    .chip-action { color: $accent; }
+    .connector-chip { width: 1fr; height: 1; margin: 0 0 1 0; }
+    #connector-list { height: auto; max-height: 16; }
     .msg-row { height: auto; width: 1fr; }
     .msg-spacer { width: 1fr; height: auto; }
     .msg { height: auto; width: 80%; max-width: 80%; margin: 1 0 0 0; padding: 0 0 0 1; border-left: solid $panel; }
@@ -98,7 +104,6 @@ class MlxLauncherApp(App):
     .code-copy { width: auto; color: $accent; padding: 0 1; }
     .code-copy:hover { background: $accent; color: $background; text-style: bold; }
     .code-body { width: 1fr; height: auto; padding: 0 1; }
-    #tools-label { padding: 1 1 0 1; }
     .msg-tool { width: auto; border-left: solid $warning; }
     .msg-tool .msg-role { color: $warning; }
     .msg-tool .msg-body { width: auto; }
@@ -118,7 +123,7 @@ class MlxLauncherApp(App):
     #p-instructions { height: 10; border: round $panel; }
     #project-buttons { height: auto; padding: 1 0; }
     #project-buttons Button { margin: 0 1 0 0; }
-    TextPromptModal, ConfirmModal, PermissionModal { align: center middle; background: $background 60%; }
+    TextPromptModal, ConfirmModal, PermissionModal, ConnectorsModal { align: center middle; background: $background 60%; }
     #modal-box { width: 64; height: auto; padding: 1 2; border: round $primary; background: $surface; }
     #modal-buttons { height: auto; padding: 1 0 0 0; }
     #modal-buttons Button { margin: 0 1 0 0; }

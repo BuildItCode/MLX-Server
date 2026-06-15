@@ -35,7 +35,6 @@ from textual.widgets import (
     ListView,
     Select,
     Static,
-    Switch,
     TextArea,
 )
 
@@ -58,6 +57,7 @@ from ..widgets.code_block import CodeBlock
 from ..widgets.path_input import resolve_path
 from ..widgets.safe_content import plain, title_sub
 from ..widgets.thinking import ThinkingIndicator
+from ..widgets.toggle_chip import ToggleChip
 from textual.content import Content
 
 
@@ -243,6 +243,47 @@ class TextPromptModal(ModalScreen[Optional[str]]):
         self.dismiss(None)
 
 
+class ConnectorsModal(ModalScreen[None]):
+    """Pick which configured MCP connectors are enabled for tool use. Each server
+    is a chip — lit = enabled. Toggling persists immediately; the tools loop reads
+    `enabled` per turn (mcp_client.open_sessions), so changes take effect at once."""
+
+    BINDINGS = [Binding("escape", "close", "Close")]
+
+    def __init__(self, data) -> None:
+        super().__init__()
+        self._data = data
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="modal-box"):
+            yield Label("[b]Connectors[/]  ·  MCP servers for tool use")
+            if not self._data.mcp_servers:
+                yield Label(plain("No connectors yet — add MCP servers with Ctrl+G."), classes="hint")
+            with VerticalScroll(id="connector-list"):
+                for srv in self._data.mcp_servers:
+                    yield ToggleChip(plain(srv.name), f"mcp:{srv.id}", value=srv.enabled, classes="connector-chip")
+            with Horizontal(id="modal-buttons"):
+                yield Button("Close", id="close", variant="primary")
+
+    @on(ToggleChip.Changed)
+    def _toggle(self, event: ToggleChip.Changed) -> None:
+        if not event.key.startswith("mcp:"):
+            return
+        sid = event.key[len("mcp:"):]
+        srv = next((s for s in self._data.mcp_servers if s.id == sid), None)
+        if srv is not None:
+            srv.enabled = event.value
+            store.upsert_mcp(self._data, srv)
+            store.save(self._data)
+
+    @on(Button.Pressed, "#close")
+    def _close(self) -> None:
+        self.dismiss(None)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class ProjectItem(ListItem):
     def __init__(self, project_id: Optional[str], label) -> None:
         super().__init__(Label(label))
@@ -303,19 +344,17 @@ class ChatScreen(Screen):
                 yield VerticalScroll(id="transcript")
                 with Horizontal(id="chat-toggles"):
                     yield Static("", id="context-bar", classes="ctx-bar")
-                    yield Static(classes="actions-spacer")
-                    yield Label("plan", id="plan-label", classes="toggle-label")
-                    yield Switch(id="plan")
-                    yield Label("reason", id="reason-label", classes="toggle-label")
-                    yield Switch(id="reasoning")
-                    yield Label("web", id="web-label", classes="toggle-label")
-                    yield Switch(id="web")
-                    yield Label("tools", id="tools-label", classes="toggle-label")
-                    yield Switch(id="tools")
                 with Horizontal(id="chat-actions"):
                     yield Button("↻ Regenerate", id="regenerate")
                     yield Button("✎ Edit last", id="edit-last")
                     yield Button("⤓ Export", id="export")
+                    yield Static(classes="actions-spacer")
+                    yield ToggleChip("plan", "plan", id="chip-plan")
+                    yield ToggleChip("reason", "reasoning", id="chip-reasoning")
+                    yield ToggleChip("web", "web", id="chip-web")
+                    yield ToggleChip("coding", "coding", id="chip-coding")
+                    yield ToggleChip("tools", "tools", id="chip-tools")
+                    yield Static("connectors ▾", id="chip-connectors", classes="chip chip-action")
                 yield Static("", id="attachments", classes="hidden")
                 yield Input(id="attach", placeholder="paste a file path, Enter to attach", classes="hidden")
                 with Horizontal(id="chat-inputrow"):
@@ -433,19 +472,20 @@ class ChatScreen(Screen):
         skill_ids = {s.id for s in skills.all_skills()}
         skill_sel.value = chat.skill_id if chat.skill_id in skill_ids else Select.NULL
         self._sync_reasoning_switch()
-        self.query_one("#web", Switch).value = bool(self.chat and self.chat.web_search)
-        self.query_one("#tools", Switch).value = bool(self.chat and self.chat.tools)
-        self.query_one("#plan", Switch).value = bool(self.chat and self.chat.plan_mode)
+        self.query_one("#chip-web", ToggleChip).set_value(bool(self.chat and self.chat.web_search))
+        self.query_one("#chip-tools", ToggleChip).set_value(bool(self.chat and self.chat.tools))
+        self.query_one("#chip-plan", ToggleChip).set_value(bool(self.chat and self.chat.plan_mode))
+        self.query_one("#chip-coding", ToggleChip).set_value(bool(self.chat and self.chat.coding))
         self._update_topbar()
         self._update_context_bar()
         self._render_transcript()
         self.query_one("#prompt", PromptArea).focus()
 
     def _sync_reasoning_switch(self) -> None:
-        sw = self.query_one("#reasoning", Switch)
+        chip = self.query_one("#chip-reasoning", ToggleChip)
         supported = bool(self.chat and capabilities.supports_reasoning(self.chat.model))
-        sw.disabled = not supported
-        sw.value = bool(self.chat and self.chat.reasoning and supported)
+        chip.set_enabled(supported)
+        chip.set_value(bool(self.chat and self.chat.reasoning and supported))
 
     def _update_topbar(self) -> None:
         if not self.chat:
@@ -461,6 +501,8 @@ class ChatScreen(Screen):
         if proj and proj.working_dir:
             dim += " · ▣ " + proj.working_dir.replace(os.path.expanduser("~"), "~")
         parts: list = [(self.chat.title, "bold"), "   ", (dim, "dim")]
+        if self.chat.coding:
+            parts += ["   ", ("● CODING", "bold #7fb069")]
         if self.chat.plan_mode:
             parts += ["   ", ("● PLAN MODE", "bold #d19a66")]
         self.query_one("#chat-title", Static).update(Content.assemble(*parts))
@@ -710,32 +752,32 @@ class ChatScreen(Screen):
             await asyncio.sleep(0.3)
         self.notify(f"{cfg.name}: still loading — open it from the dashboard to watch", severity="warning")
 
-    @on(Switch.Changed, "#reasoning")
-    def _reasoning_changed(self, event: Switch.Changed) -> None:
-        if self.chat and not self.query_one("#reasoning", Switch).disabled:
-            self.chat.reasoning = event.value
-            self._persist()
-
-    @on(Switch.Changed, "#web")
-    def _web_changed(self, event: Switch.Changed) -> None:
-        if self.chat:
-            self.chat.web_search = event.value
-            self._persist()
-
-    @on(Switch.Changed, "#tools")
-    def _tools_changed(self, event: Switch.Changed) -> None:
-        if self.chat:
-            self.chat.tools = event.value
-            self._persist()
-
-    @on(Switch.Changed, "#plan")
-    def _plan_changed(self, event: Switch.Changed) -> None:
-        if self.chat:
-            self.chat.plan_mode = event.value
-            self._update_topbar()
-            self._persist()
+    @on(ToggleChip.Changed)
+    def _chip_changed(self, event: ToggleChip.Changed) -> None:
+        if not self.chat:
+            return
+        key, val = event.key, event.value
+        if key == "reasoning":
+            self.chat.reasoning = val
+        elif key == "web":
+            self.chat.web_search = val
+        elif key == "tools":
+            self.chat.tools = val
+        elif key == "plan":
+            self.chat.plan_mode = val
             self.notify("Plan mode on — I'll propose a plan to approve, not make changes"
-                        if event.value else "Plan mode off")
+                        if val else "Plan mode off")
+        elif key == "coding":
+            self.chat.coding = val
+            self.notify("Coding mode on — senior-engineer prompt; the model validates its work"
+                        if val else "Coding mode off")
+        self._update_topbar()
+        self._persist()
+
+    def on_click(self, event: events.Click) -> None:
+        # the connectors chip is a plain Static, not a toggle → open the popup
+        if getattr(event.widget, "id", None) == "chip-connectors":
+            self.app.push_screen(ConnectorsModal(self.data))
 
     @on(Button.Pressed, "#new-chat")
     def _new_chat_btn(self) -> None:

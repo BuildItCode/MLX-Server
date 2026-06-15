@@ -399,6 +399,111 @@ def test_editor_shows_only_engine_relevant_field_groups():
     asyncio.run(go())
 
 
+def test_coding_mode_injects_senior_engineer_system_prompt():
+    from mlx_launcher.chat.client import CODING_MODE_INSTRUCTIONS, build_openai_messages
+    from mlx_launcher.chat.models import Chat, ChatMessage
+
+    on = build_openai_messages(Chat(coding=True, messages=[ChatMessage(role="user", text="hi")]))
+    assert on[0]["role"] == "system"
+    assert "senior software engineer" in on[0]["content"]
+    assert "VALIDATE" in on[0]["content"] and "tsc --noEmit" in CODING_MODE_INSTRUCTIONS
+    # off → no system message at all
+    off = build_openai_messages(Chat(messages=[ChatMessage(role="user", text="hi")]))
+    assert off[0]["role"] == "user"
+    # coding + plan both apply, plan kept LAST (most salient framing)
+    both = build_openai_messages(Chat(coding=True, plan_mode=True, messages=[ChatMessage(role="user", text="hi")]))
+    sys = both[0]["content"]
+    assert sys.index("senior software engineer") < sys.index("PLAN MODE")
+
+
+def test_toggle_chip_click_posts_changed_and_reflects_state():
+    import asyncio
+
+    from textual import on
+    from textual.app import App as TApp
+    from textual.containers import Horizontal
+
+    from mlx_launcher.widgets.toggle_chip import ToggleChip
+
+    seen = []
+
+    class T(TApp):
+        def compose(self):
+            with Horizontal():
+                yield ToggleChip("web", "web", id="c")
+
+        @on(ToggleChip.Changed)
+        def _h(self, e):
+            seen.append((e.key, e.value))
+
+    async def go():
+        async with T().run_test() as pilot:
+            chip = pilot.app.query_one("#c", ToggleChip)
+            assert not chip.value and not chip.has_class("-on")
+            await pilot.click("#c")
+            assert chip.value and chip.has_class("-on")        # lit when on
+            await pilot.click("#c")
+            assert not chip.value and not chip.has_class("-on")
+            chip.set_value(True)                               # programmatic: no post
+            assert chip.has_class("-on")
+            chip.set_enabled(False)                            # lock → off + greyed
+            assert chip.has_class("-disabled") and not chip.value
+            await pilot.click("#c")                            # locked click is a no-op
+            assert not chip.value
+
+    asyncio.run(go())
+    assert seen == [("web", True), ("web", False)]  # only the two real clicks posted
+
+
+def test_chip_changed_dispatch_updates_chat_flags():
+    from mlx_launcher.chat.models import Chat
+    from mlx_launcher.screens.chat import ChatScreen
+    from mlx_launcher.widgets.toggle_chip import ToggleChip
+
+    cs = ChatScreen.__new__(ChatScreen)
+    cs.chat = Chat()
+    cs._update_topbar = lambda: None
+    cs._persist = lambda: None
+    cs.notify = lambda *a, **k: None
+    for key, field in [("web", "web_search"), ("tools", "tools"), ("plan", "plan_mode"),
+                       ("coding", "coding"), ("reasoning", "reasoning")]:
+        cs._chip_changed(ToggleChip.Changed(key, True))
+        assert getattr(cs.chat, field) is True
+        cs._chip_changed(ToggleChip.Changed(key, False))
+        assert getattr(cs.chat, field) is False
+
+
+def test_connectors_modal_toggles_enabled_and_persists(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    import asyncio
+
+    from textual.app import App as TApp
+
+    from mlx_launcher.chat import store
+    from mlx_launcher.chat.models import McpServer
+    from mlx_launcher.screens.chat import ConnectorsModal
+    from mlx_launcher.widgets.toggle_chip import ToggleChip
+
+    data = store.load()
+    srv = McpServer(name="My Tools", command="echo", enabled=True)
+    store.upsert_mcp(data, srv)
+    store.save(data)
+
+    async def go():
+        async with TApp().run_test() as pilot:
+            await pilot.app.push_screen(ConnectorsModal(data))
+            await pilot.pause(0.1)
+            modal = pilot.app.screen
+            chip = modal.query_one(".connector-chip", ToggleChip)
+            assert chip.value is True
+            await pilot.click(".connector-chip")
+            await pilot.pause(0.05)
+            assert srv.enabled is False                       # in-memory flipped
+            assert store.load().mcp_servers[0].enabled is False  # and persisted to disk
+
+    asyncio.run(go())
+
+
 def test_perm_prompt_summaries():
     from mlx_launcher.screens.chat import _perm_prompt
 

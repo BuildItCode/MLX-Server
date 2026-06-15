@@ -255,6 +255,22 @@ PLAN_MODE_INSTRUCTIONS = (
     "implementing until the user explicitly approves."
 )
 
+CODING_MODE_INSTRUCTIONS = (
+    "You are a senior software engineer. Write correct, idiomatic, production-quality code "
+    "that matches the surrounding style, naming, and conventions of the codebase.\n"
+    "- VALIDATE before you claim something works. When a working directory and tools are "
+    "available, run the project's own checks — type-check, lint, build, and tests "
+    "(e.g. `tsc --noEmit`, `npm run lint`, `npm test`, `pytest`, `cargo check`, `go vet`) — "
+    "and FIX everything they surface. Never report success on code you have not verified.\n"
+    "- Reuse existing functions, utilities, and patterns instead of adding new ones; read the "
+    "relevant code before changing it.\n"
+    "- Handle errors and edge cases. Do not leave TODOs, stubs, or placeholder implementations "
+    "unless the user asks for them.\n"
+    "- Keep changes focused and minimal; don't refactor unrelated code.\n"
+    "- If a requirement is ambiguous or you must assume something, state the assumption briefly. "
+    "Explain only non-obvious decisions, and keep explanations concise."
+)
+
 
 def prepend_system(messages: list[dict], note: str) -> list[dict]:
     """Fold `note` into the system prompt as ONE leading system message — merging
@@ -281,6 +297,8 @@ def build_openai_messages(
         for p in (skill_instructions, project.instructions if project else "")
         if p and p.strip()
     ]
+    if getattr(chat, "coding", False):
+        parts.append(CODING_MODE_INSTRUCTIONS)
     if getattr(chat, "plan_mode", False):
         parts.append(PLAN_MODE_INSTRUCTIONS)  # last = the most salient framing
     if parts:
