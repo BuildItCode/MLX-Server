@@ -94,13 +94,13 @@ class MlxLauncherApp(App):
     /* compact, flat secondary actions (sit below the input row) */
     #chat-actions Button { height: 1; min-width: 0; border: none; padding: 0 1; margin: 0 1 0 0; color: $text-muted; background: $panel; }
     #chat-actions Button:hover { color: $text; }
-    /* read-aloud while speaking → accent highlight */
-    #chat-actions Button.-reading { color: $background; background: $accent; text-style: bold; }
+    /* read-aloud while speaking → flat accent text (label also flips to "Stop") */
+    #chat-actions Button.-reading { color: $accent; text-style: bold; }
     #chat-inputrow { height: auto; padding: 0 1 1 1; }
     #prompt { width: 1fr; height: 6; border: round $panel; border-title-color: $accent; }
     #chat-inputrow Button { margin: 0 0 0 1; }
-    /* mic while recording → red so it reads as "live" */
-    #mic-btn.-recording { color: $background; background: #e06c75; text-style: bold; }
+    /* mic while recording → flat red text (label also flips to "Stop") */
+    #mic-btn.-recording { color: $error; text-style: bold; }
     #chat-chips { height: auto; padding: 1 1; align-vertical: middle; }
     .actions-spacer { width: 1fr; height: 1; }
     .ctx-bar { width: auto; padding: 0; }
@@ -186,6 +186,29 @@ class MlxLauncherApp(App):
     #p-instructions { height: 10; border: round $panel; }
     #project-buttons { height: auto; padding: 1 0; }
     #project-buttons Button { margin: 0 1 0 0; }
+    /* HuggingFace model browser (search + download), opened from the server editor */
+    #hf-body { height: 1fr; padding: 0 1; }
+    #hf-controls { height: auto; padding: 1 0; align-vertical: middle; }
+    #hf-controls #hf-query { width: 1fr; }
+    #hf-controls #hf-go { margin: 0 0 0 1; }
+    #hf-controls .chip { margin: 0 0 0 1; }
+    #hf-budget { height: auto; color: $text-muted; padding: 0 0 1 0; }
+    #hf-status { height: auto; color: $text-muted; }
+    #hf-results { height: 1fr; border: round $panel; padding: 0 1; }
+    .hf-row { height: auto; align-vertical: middle; padding: 0 0 1 0; }
+    .hf-row-name { width: 1fr; height: auto; }
+    .hf-row-fit { width: 22; height: auto; }
+    .hf-row-meta { width: 12; height: auto; color: $text-muted; }
+    .hf-row Button { width: 14; min-width: 10; height: 1; margin: 0 0 0 1; border: none; }
+    .hf-row .hf-pick { background: $success; color: $background; text-style: bold; }
+    .hf-row .hf-choose { background: $panel; color: $accent; }
+    #hf-log { height: 12; border: round $panel; margin: 1 0 0 0; }
+    #hf-buttons { height: auto; padding: 1 0; }
+    #hf-buttons Button { margin: 0 1 0 0; }
+    /* editor: model field + Search HF button on one row */
+    #model-row { height: auto; }
+    #model-row #model { width: 1fr; }
+    #model-row #hf-search { width: auto; min-width: 12; margin: 0 0 0 1; }
     TextPromptModal, ConfirmModal, PermissionModal, ConnectorsModal, SubagentsModal { align: center middle; background: $background 60%; }
     #modal-box { width: 64; height: auto; padding: 1 2; border: round $primary; background: $surface; }
     #modal-buttons { height: auto; padding: 1 0 0 0; }
@@ -276,6 +299,13 @@ class MlxLauncherApp(App):
         return [m for m in self._managers.values() if m.is_running]
 
     def on_unmount(self) -> None:
+        # Stop any voice playback/recording so its worker thread returns — otherwise asyncio's
+        # shutdown_default_executor() blocks joining it and the process appears to hang on quit.
+        try:
+            import sounddevice as sd
+            sd.stop()
+        except Exception:  # noqa: BLE001 — sounddevice not installed / no active stream
+            pass
         # Don't orphan model-server subprocesses on quit: SIGTERM them all, give them a
         # moment to exit, then SIGKILL any survivor. A server still loading weights can be
         # slow to honor SIGTERM and would otherwise outlive us holding memory and the port
@@ -292,6 +322,11 @@ class MlxLauncherApp(App):
 
 
 def run() -> None:
+    # Do this on the MAIN thread before the app starts: tqdm's default multiprocessing lock
+    # (used by mlx_whisper + our download bar) spawns the resource_tracker via fork_exec, which
+    # crashes with "bad value(s) in fds_to_keep" when first triggered from a worker thread.
+    from .chat import voice
+    voice.ensure_threading_tqdm_lock()
     MlxLauncherApp().run()
 
 

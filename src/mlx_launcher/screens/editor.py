@@ -31,6 +31,7 @@ from textual.widgets import (
     Switch,
 )
 
+from .. import hf
 from ..config import flags, store
 from ..config.models import ServerConfig
 from ..server import discovery
@@ -66,6 +67,10 @@ _MANUAL_GROUP_ENGINES: dict[str, set[str]] = {
     "grp-llamacpp": {"llama-cpp"},               # GPU layers, threads, ctx, KV cache types
 }
 
+# Format → engine for the "Search HF" flow: a downloaded model is paired with the engine
+# that runs its format (GGUF → llama-cpp; MLX → an MLX engine).
+_MLX_ENGINES = {"mlx-lm", "mlx-vlm", "vllm-mlx"}
+
 
 class EditorScreen(Screen):
     BINDINGS = [
@@ -96,8 +101,10 @@ class EditorScreen(Screen):
             yield Label("", id="engine-hint", classes="hint")
             yield Label("Name")
             yield DropPathInput(id="name", placeholder="My model server")
-            yield Label("Model — drag a folder onto the terminal, or paste a HuggingFace repo id")
-            yield PathInput(id="model", placeholder="/path/to/model  or  mlx-community/Qwen2.5-7B-4bit")
+            yield Label("Model — drag a folder, paste a HuggingFace repo id, or search HF")
+            with Horizontal(id="model-row"):
+                yield PathInput(id="model", placeholder="/path/to/model  or  mlx-community/Qwen2.5-7B-4bit")
+                yield Button("Search HF", id="hf-search")
             yield Label("", id="model-hint", classes="hint")
             with Horizontal(classes="row"):
                 with Vertical(classes="col"):
@@ -527,3 +534,34 @@ class EditorScreen(Screen):
         if self._save() is not None:
             self.notify("Saved")
             self.app.pop_screen()
+
+    # --- HuggingFace search / download -----------------------------------
+
+    @on(Button.Pressed, "#hf-search")
+    def _hf_search(self) -> None:
+        self.run_worker(self._hf_search_flow(), exclusive=True)
+
+    async def _hf_search_flow(self) -> None:
+        from .hf_browse import HFBrowseScreen
+        current = str(self.query_one("#engine", Select).value)
+        result = await self.app.push_screen_wait(
+            HFBrowseScreen(allow_mlx=hf.is_apple_silicon(), current_engine=current))
+        if result is not None:
+            self._apply_hf_result(result)
+
+    def _engine_for_format(self, fmt: str, current: str) -> str:
+        """GGUF → llama-cpp; MLX → keep the current MLX engine if one's selected, else mlx-lm."""
+        if fmt == "gguf":
+            return "llama-cpp"
+        return current if current in _MLX_ENGINES else "mlx-lm"
+
+    def _apply_hf_result(self, result) -> None:
+        """A model picked in the HF browser: switch the engine to match its format, then fill
+        the model field (the repo id — the engines resolve it from the HF cache on launch)."""
+        sel = self.query_one("#engine", Select)
+        engine = self._engine_for_format(result.fmt, str(sel.value))
+        if str(sel.value) != engine:
+            sel.value = engine  # fires Select.Changed → hint + gating + preview
+        self._set_model_path(result.repo_id)
+        self._apply_engine_gating()  # idempotent — correct even when the engine didn't change
+        self._update_preview()

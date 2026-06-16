@@ -197,9 +197,9 @@ def test_mic_button_label_toggles():
     btn = Btn()
     cs.query_one = lambda *a, **k: btn
     cs._set_mic_button(recording=True)
-    assert btn.label == "■ Listening…" and "-recording" in btn.classes
+    assert btn.label == "Stop" and "-recording" in btn.classes
     cs._set_mic_button(recording=False)
-    assert btn.label == "🎙 Mic" and "-recording" not in btn.classes
+    assert btn.label == "Mic" and "-recording" not in btn.classes
 
 
 def test_chat_screen_mounts_voice_buttons(tmp_path, monkeypatch):
@@ -221,13 +221,13 @@ def test_chat_screen_mounts_voice_buttons(tmp_path, monkeypatch):
             scr = app.screen
             mic = scr.query_one("#mic-btn", Button)
             read = scr.query_one("#read-aloud", Button)
-            assert str(mic.label) == "🎙 Mic" and str(read.label) == "🔊 Read aloud"
+            assert str(mic.label) == "Mic" and str(read.label) == "Read aloud"
 
             # the live-state helpers drive the real widgets' label + style class
             scr._set_mic_button(recording=True)
             scr._set_read_button(reading=True)
             await pilot.pause()
-            assert str(mic.label) == "■ Listening…" and mic.has_class("-recording")
-            assert str(read.label) == "■ Stop" and read.has_class("-reading")
+            assert str(mic.label) == "Stop" and mic.has_class("-recording")
+            assert str(read.label) == "Stop" and read.has_class("-reading")
 
     asyncio.run(go())

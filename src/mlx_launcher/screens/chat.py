@@ -486,12 +486,12 @@ class ChatScreen(Screen):
                 with Horizontal(id="chat-inputrow"):
                     yield PromptArea(id="prompt", soft_wrap=True)
                     yield Button("+ Attach", id="attach-btn")
-                    yield Button("🎙 Mic", id="mic-btn")
+                    yield Button("Mic", id="mic-btn")
                     yield Button("Send", id="send", variant="primary")
                 with Horizontal(id="chat-actions"):  # secondary actions, compact, below the input
                     yield Button("↻ Regenerate", id="regenerate")
                     yield Button("✎ Edit last", id="edit-last")
-                    yield Button("🔊 Read aloud", id="read-aloud")
+                    yield Button("Read aloud", id="read-aloud")
                     yield Button("⤓ Export", id="export")
         yield Footer()
 
@@ -1285,7 +1285,7 @@ class ChatScreen(Screen):
             btn = self.query_one("#mic-btn", Button)
         except Exception:  # noqa: BLE001 — not mounted
             return
-        btn.label = "■ Listening…" if recording else "🎙 Mic"
+        btn.label = "Stop" if recording else "Mic"
         btn.set_class(recording, "-recording")
 
     # --- voice: read aloud (text-to-speech) ------------------------------
@@ -1348,7 +1348,7 @@ class ChatScreen(Screen):
             btn = self.query_one("#read-aloud", Button)
         except Exception:  # noqa: BLE001 — not mounted
             return
-        btn.label = "■ Stop" if reading else "🔊 Read aloud"
+        btn.label = "Stop" if reading else "Read aloud"
         btn.set_class(reading, "-reading")
 
     def _maybe_autoread(self) -> None:

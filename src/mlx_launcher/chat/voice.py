@@ -17,7 +17,9 @@ return availability info or raise :class:`VoiceError` with an actionable message
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import os
 import platform
 import re
 import shutil
@@ -56,6 +58,30 @@ class VoiceError(RuntimeError):
     """A voice operation failed (missing backend, mic error, download error, …)."""
 
 
+@contextlib.contextmanager
+def _silence_stderr_fd():
+    """Mute the OS-level stderr fd for the duration. mlx_whisper's first-use model download is
+    xet-backed, and hf_xet (Rust) prints progress + an "unauthenticated" notice straight to fd 2,
+    bypassing Python — which would glitch the TUI. Runs in the transcription worker thread; the
+    screen renders on stdout, so this is safe and the fd is always restored."""
+    saved = None
+    try:
+        saved = os.dup(2)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 2)
+        os.close(devnull)
+    except Exception:  # noqa: BLE001
+        saved = None
+    try:
+        yield
+    finally:
+        if saved is not None:
+            try:
+                os.dup2(saved, 2)
+            finally:
+                os.close(saved)
+
+
 # --- capability probing ---------------------------------------------------
 
 def _have(module: str) -> bool:
@@ -68,6 +94,38 @@ def _have(module: str) -> bool:
 
 def is_apple_silicon() -> bool:
     return sys.platform == "darwin" and platform.machine() == "arm64"
+
+
+_tqdm_lock_set = False
+
+
+def ensure_threading_tqdm_lock() -> None:
+    """Swap tqdm's default write lock for a plain threading lock.
+
+    tqdm's default is a *multiprocessing* lock, and creating it spawns Python's
+    multiprocessing `resource_tracker` via `fork_exec`. Triggered from a worker thread under
+    the Textual app that raises ``ValueError: bad value(s) in fds_to_keep`` (and the lingering
+    tracker can hang interpreter shutdown). mlx_whisper (and our own download bar) use tqdm
+    internally, so we never want its multiprocessing lock — a threading lock is plenty. Called
+    once at app startup on the main thread; idempotent."""
+    global _tqdm_lock_set
+    if _tqdm_lock_set:
+        return
+    try:
+        import threading
+
+        import tqdm
+        tqdm.tqdm.set_lock(threading.RLock())
+        _tqdm_lock_set = True
+    except Exception:  # noqa: BLE001 — tqdm absent or API change → leave it alone
+        pass
+    # also quiet huggingface_hub's own download bars (mlx_whisper's "Fetching files") — they'd
+    # write to the terminal; our HF-download bar uses its own force-enabled tqdm, so it's safe.
+    try:
+        import huggingface_hub
+        huggingface_hub.utils.disable_progress_bars()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _system_tts_argv(text: str) -> Optional[list[str]]:
@@ -194,10 +252,13 @@ def transcribe(audio, model_setting: str = DEFAULT_STT_MODEL) -> str:
     if audio.size < STT_SR // 5:  # < 0.2 s — almost certainly an accidental tap
         return ""
 
+    ensure_threading_tqdm_lock()  # mlx_whisper uses tqdm internally; avoid its mp-lock fork_exec
+
     if is_apple_silicon() and _have("mlx_whisper"):
         import mlx_whisper
 
-        result = mlx_whisper.transcribe(audio, path_or_hf_repo=_mlx_whisper_repo(model_setting))
+        with _silence_stderr_fd():  # mute hf_xet's first-download progress/warning on fd 2
+            result = mlx_whisper.transcribe(audio, path_or_hf_repo=_mlx_whisper_repo(model_setting))
         return (result.get("text") or "").strip()
 
     if _have("faster_whisper"):
@@ -206,11 +267,12 @@ def transcribe(audio, model_setting: str = DEFAULT_STT_MODEL) -> str:
 
         size = model_setting if "/" not in (model_setting or "") else "base"
         size = (size or "base").strip() or "base"
-        if _faster_model is None or getattr(_faster_model, "_lis_size", None) != size:
-            _faster_model = WhisperModel(size, device="cpu", compute_type="int8")
-            _faster_model._lis_size = size  # type: ignore[attr-defined]
-        segments, _info = _faster_model.transcribe(audio, beam_size=1)
-        return " ".join(seg.text for seg in segments).strip()
+        with _silence_stderr_fd():
+            if _faster_model is None or getattr(_faster_model, "_lis_size", None) != size:
+                _faster_model = WhisperModel(size, device="cpu", compute_type="int8")
+                _faster_model._lis_size = size  # type: ignore[attr-defined]
+            segments, _info = _faster_model.transcribe(audio, beam_size=1)
+            return " ".join(seg.text for seg in segments).strip()
 
     raise VoiceError(f"no speech-to-text backend installed; install: {install_command()}")
 
@@ -352,14 +414,35 @@ class Speaker:
         import sounddevice as sd
 
         kokoro = _kokoro_instance()
+        # Synthesize every sentence-chunk first, then play ONE contiguous buffer. A separate
+        # sd.play() per chunk opens/closes a fresh stream each time → clicks + gaps at every
+        # boundary (the "artifacts"); a single stream over joined audio is gapless.
+        parts: list = []
+        sample_rate = 24000
         for chunk in _split_text(text):
             if self._stop.is_set():
                 return
             samples, sample_rate = kokoro.create(chunk, voice=self.voice, speed=1.0, lang="en-us")
-            if self._stop.is_set():
-                return
-            sd.play(np.asarray(samples, dtype=np.float32), int(sample_rate))
-            sd.wait()  # returns early when stop() calls sd.stop()
+            parts.append(np.ascontiguousarray(samples, dtype=np.float32))
+        if not parts or self._stop.is_set():
+            return
+        if len(parts) == 1:
+            audio = parts[0]
+        else:
+            gap = np.zeros(int(0.06 * sample_rate), dtype=np.float32)  # ~60ms pause between sentences
+            joined: list = []
+            for i, part in enumerate(parts):
+                joined.append(part)
+                if i < len(parts) - 1:
+                    joined.append(gap)
+            audio = np.concatenate(joined)
+        # latency="high" → a larger output buffer, which avoids the underrun clicks that the
+        # default low-latency buffer produces while the UI/model keep the CPU busy.
+        try:
+            sd.play(audio, int(sample_rate), latency="high")
+        except Exception:  # noqa: BLE001 — some backends reject the latency hint
+            sd.play(audio, int(sample_rate))
+        sd.wait()  # returns early when stop() calls sd.stop()
 
     def _run_system(self, text: str) -> None:
         argv = _system_tts_argv(text)
