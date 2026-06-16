@@ -61,7 +61,8 @@ gating (`screens/editor.py`); a setup detect/install entry (`screens/setup.py` +
 - `chat/` — the chat engine: `client.py` (streaming, `<think>`/Harmony parsing, tool-call
   recovery), `acp/bridge.py` (HTTP to the OpenAI API), `tools.py` (web_search), `fs_tools.py`
   (sandboxed file tools), `mcp_client.py` (MCP sessions), `prompted_tools.py` (prompted
-  tool-call protocol), `capabilities.py`, `skills.py`, `store.py`, `models.py`.
+  tool-call protocol), `capabilities.py`, `skills.py`, `store.py`, `models.py`, and `voice.py`
+  (optional mic speech-to-text + read-aloud text-to-speech; all audio deps imported lazily).
 - `acp/` — the Agent Client Protocol agent for Xcode (`agent.py`, `bridge.py`, `entry.py`).
 - `widgets/` — small reusable widgets (toggle chips, code blocks, banner, safe content).
 - `skills/` — bundled `SKILL.md` instruction sets shipped inside the package.
@@ -109,12 +110,23 @@ gating (`screens/editor.py`); a setup detect/install entry (`screens/setup.py` +
 - **Each store is one JSON document** written atomically (temp file → flush + fsync → rename).
   A screen that holds its own `store.load()` copy must re-read immediately before saving, or
   it can clobber writes made elsewhere.
+- **Voice is optional and lazy.** `chat/voice.py` keeps the core app free of any hard audio
+  dependency: nothing heavy is imported at module load — `availability()` probes with
+  `importlib.util.find_spec` and the chat buttons degrade to an install hint when the `voice`
+  extra is absent. STT/TTS are **blocking + heavy**, so the chat runs them via
+  `asyncio.to_thread` inside a worker (`_transcribe_worker` / `_speak_worker`); recording uses a
+  PortAudio callback thread. Read-aloud falls back to the OS voice (`say` / `espeak-ng`) so it
+  works even without the extra. Unlike engines (console scripts on PATH), the voice deps are
+  imported in-process, so they install into the *running* interpreter (`bootstrap.voice_install_argv`).
 
 ## Where common changes go
 
 - **A chat tool:** a spec + runner in `chat/tools.py` (or `fs_tools.py` / `mcp_client.py`),
   wired into the loop in `screens/chat.py:_generate_tools`.
 - **A model capability heuristic:** `chat/capabilities.py` (name-based; always user-overridable).
+- **Voice (STT/TTS) behavior:** `chat/voice.py` (engines, model resolution, capture/playback);
+  the mic / read-aloud buttons + workers in `screens/chat.py`; voice prefs on `AppSettings`
+  (`config/models.py`); the install entry in `bootstrap.py` + `screens/setup.py`.
 - **Install / run scripts:** `install.sh` / `run.sh` (macOS), `install-linux.sh` /
   `run-linux.sh`, `install-windows.ps1` / `run-windows.ps1`.
 

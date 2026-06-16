@@ -110,6 +110,13 @@ class AppSettings(BaseModel):
     theme: str = "mlx-dark"
     mlx_server_path: Optional[str] = None  # global fallback when not on PATH
 
+    # Voice (speech) — optional; drives the chat mic / read-aloud buttons. Needs the
+    # `voice` extra installed (sounddevice + whisper + kokoro-onnx); see chat/voice.py.
+    voice_stt_model: str = "base"       # Whisper size keyword (tiny|base|small|…) or a full HF repo id
+    voice_tts_voice: str = "af_heart"   # Kokoro voice name
+    voice_autosend: bool = False        # send immediately after a mic transcription (else: review first)
+    voice_autoread: bool = False        # read each assistant reply aloud automatically
+
 
 class ConfigFile(BaseModel):
     model_config = ConfigDict(extra="ignore")

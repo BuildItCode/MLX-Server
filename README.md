@@ -50,6 +50,12 @@ with them or wire them into Xcode 27. It drives four interchangeable backends:
   instead of taking action.
 - **Context bar**: a live token-usage meter showing how much of the model's context window the
   conversation uses.
+- **Talk to it** (optional): a **🎙 Mic** button transcribes your speech into the prompt
+  (Whisper — `mlx-whisper` on Apple Silicon, `faster-whisper` elsewhere) and a **🔊 Read aloud**
+  button speaks the last reply (Kokoro-82M via `kokoro-onnx`, with the system voice as a
+  fallback). All local, no API keys. Enable with `pip install "mlx-launcher[voice]"` (or the
+  **Install voice** button on the setup screen). Auto-send-after-mic and auto-read-replies are
+  opt-in settings.
 - **Dependency self-check**: detects which engine binaries are on your `PATH`
   (`mlx_lm.server`, `mlx_vlm.server`, `vllm-mlx`, `llama-server`) and offers to install the
   ones you're missing (`p` on the dashboard).
@@ -100,5 +106,9 @@ The model engines (MLX / llama.cpp) are left installed.
   - **mlx-lm / mlx-vlm / vllm-mlx** — installed via `uv tool` or the in-app setup (`p`).
   - **llama.cpp** (`llama-server`) — `brew install llama.cpp` on macOS; the Linux/Windows
     install scripts fetch a prebuilt binary for you.
+- **Voice (optional)** — for the chat mic / read-aloud buttons: `pip install "mlx-launcher[voice]"`
+  (`sounddevice` + `numpy` + `kokoro-onnx`, plus `mlx-whisper` on Apple Silicon / `faster-whisper`
+  elsewhere). The Kokoro voice model (~325 MB) downloads once on first use. Read-aloud also works
+  without the extra via the OS voice (macOS `say` / `espeak-ng`).
 - [**Homebrew**](https://brew.sh) is recommended on macOS — the easiest way to get Python, and
   `./install.sh` uses it for a clean global install.

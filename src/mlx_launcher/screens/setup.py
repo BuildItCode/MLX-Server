@@ -13,6 +13,7 @@ from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, RichLog, Static
 
 from .. import bootstrap
+from ..chat import voice
 
 
 class SetupScreen(Screen):
@@ -27,6 +28,7 @@ class SetupScreen(Screen):
                 yield Button("Install mlx-vlm", id="install_vlm", variant="primary")
                 yield Button("Install vllm-mlx", id="install_vllm", variant="primary")
                 yield Button("Install llama.cpp", id="install_llama", variant="primary")
+                yield Button("Install voice", id="install_voice", variant="primary")
                 yield Button("Locate binary", id="locate")
                 yield Button("Install globally", id="install_global", variant="success")
                 yield Button("Back", id="back")
@@ -49,6 +51,20 @@ class SetupScreen(Screen):
                 lines.append(f"[#7fb069]✓ {binary} (located)[/]  [dim]{escape(located)}[/]")
             else:
                 lines.append(f"[#e06c75]✗ {binary} not found[/] — install it, or locate an existing binary.")
+        # Voice (speech) — optional; powers the chat mic + read-aloud buttons.
+        a = voice.availability()
+        if a.can_transcribe:
+            lines.append("[#7fb069]✓ voice input (speech-to-text) ready[/]")
+        else:
+            lines.append("[#e06c75]✗ voice input not available[/] — needs sounddevice + Whisper; ‘Install voice’ adds them.")
+        if a.tts_kokoro:
+            lines.append("[#7fb069]✓ read-aloud (Kokoro text-to-speech) ready[/]")
+        elif a.tts_system:
+            lines.append("[#7fb069]✓ read-aloud via the system voice[/] [dim](install voice for Kokoro quality)[/]")
+        else:
+            lines.append("[#e06c75]✗ read-aloud not available[/] — ‘Install voice’ adds Kokoro text-to-speech.")
+        lines.append("[dim]‘Install voice’ will run: " + escape(" ".join(bootstrap.voice_install_argv())) + "[/]")
+
         gi = bootstrap.global_install_argv()
         if gi is not None:
             lines.append("[dim]‘Install globally’ will run: " + escape(" ".join(gi)) + "[/]")
@@ -81,6 +97,10 @@ class SetupScreen(Screen):
                         severity="warning")
             return
         self.run_worker(self._run(argv), exclusive=True)
+
+    @on(Button.Pressed, "#install_voice")
+    def _install_voice(self) -> None:
+        self.run_worker(self._run(bootstrap.voice_install_argv()), exclusive=True)
 
     @on(Button.Pressed, "#install_global")
     def _install_global(self) -> None:

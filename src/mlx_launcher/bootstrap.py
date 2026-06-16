@@ -7,6 +7,7 @@ and the optional "install me as a global command" flow."""
 from __future__ import annotations
 
 import asyncio
+import platform
 import shutil
 import sys
 from pathlib import Path
@@ -66,6 +67,23 @@ def pip_install_argv(package: str = "mlx-lm") -> list[str]:
     """Install into the *current* interpreter's environment. Fallback only — the
     server script may not land on PATH (see engine_install_argv)."""
     return [sys.executable, "-m", "pip", "install", "--upgrade", package]
+
+
+# --- voice (speech) deps -------------------------------------------------
+
+def voice_packages() -> list[str]:
+    """The optional voice-I/O packages for this platform: mic capture + Whisper STT +
+    Kokoro TTS. Apple Silicon gets mlx-whisper; everything else faster-whisper."""
+    pkgs = ["sounddevice", "numpy", "kokoro-onnx"]
+    pkgs.append("mlx-whisper" if (sys.platform == "darwin" and platform.machine() == "arm64")
+                else "faster-whisper")
+    return pkgs
+
+
+def voice_install_argv() -> list[str]:
+    """Install the voice deps into the *running* interpreter — unlike the engines (console
+    scripts on PATH), these are imported in-process, so they must land in this env."""
+    return [sys.executable, "-m", "pip", "install", "--upgrade", *voice_packages()]
 
 
 def pipx_inject_argv(package: str = "mlx-lm", into: str = "mlx-launcher") -> list[str]:

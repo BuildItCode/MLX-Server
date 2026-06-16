@@ -39,7 +39,7 @@ from textual.widgets import (
     TextArea,
 )
 
-from ..chat import capabilities, fs_tools, knowledge, mcp_client, prompted_tools, skills, store
+from ..chat import capabilities, fs_tools, knowledge, mcp_client, prompted_tools, skills, store, voice
 from ..chat import tools as chat_tools
 from ..chat.blocks import linkify_urls, split_blocks
 from ..chat.client import (
@@ -440,6 +440,8 @@ class ChatScreen(Screen):
         self._side_sub: Optional[Subagent] = None
         self._side_cfg: Optional[ServerConfig] = None  # the (possibly port-bumped) profile it runs on
         self._side_messages: list[ChatMessage] = []
+        self._recorder = None  # voice.Recorder while the mic is capturing, else None
+        self._speaker = None   # voice.Speaker while reading a reply aloud, else None
 
     # --- layout ----------------------------------------------------------
 
@@ -484,10 +486,12 @@ class ChatScreen(Screen):
                 with Horizontal(id="chat-inputrow"):
                     yield PromptArea(id="prompt", soft_wrap=True)
                     yield Button("+ Attach", id="attach-btn")
+                    yield Button("🎙 Mic", id="mic-btn")
                     yield Button("Send", id="send", variant="primary")
                 with Horizontal(id="chat-actions"):  # secondary actions, compact, below the input
                     yield Button("↻ Regenerate", id="regenerate")
                     yield Button("✎ Edit last", id="edit-last")
+                    yield Button("🔊 Read aloud", id="read-aloud")
                     yield Button("⤓ Export", id="export")
         yield Footer()
 
@@ -694,6 +698,19 @@ class ChatScreen(Screen):
         flags = getattr(self, "_cancel_flags", None)
         if isinstance(flags, dict):
             flags["main"] = flags["side"] = True
+        # stop any in-flight voice recording / playback
+        rec, self._recorder = getattr(self, "_recorder", None), None
+        if rec is not None:
+            try:
+                rec.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        sp, self._speaker = getattr(self, "_speaker", None), None
+        if sp is not None:
+            try:
+                sp.stop()
+            except Exception:  # noqa: BLE001
+                pass
         cfg = getattr(self, "_side_cfg", None)
         if getattr(self, "_side_open", False) and cfg is not None:
             mgr = self.app.get_manager(cfg.id)
@@ -1200,6 +1217,151 @@ class ChatScreen(Screen):
     @on(Button.Pressed, "#export")
     def _export_btn(self) -> None:
         self.action_export()
+
+    # --- voice: mic (speech-to-text) -------------------------------------
+
+    @on(Button.Pressed, "#mic-btn")
+    def _mic_btn(self) -> None:
+        # toggle push-to-talk: first click records, second click transcribes
+        if self._recorder is not None:
+            self._stop_recording_and_transcribe()
+        else:
+            self._start_recording()
+
+    def _start_recording(self) -> None:
+        avail = voice.availability()
+        if not avail.can_transcribe:
+            self.notify(f"Voice input needs the audio deps. Install:  {voice.install_command()}",
+                        severity="warning", timeout=10)
+            return
+        try:
+            rec = voice.Recorder()
+            rec.start()
+        except Exception as exc:  # noqa: BLE001 — no mic / busy device / unsupported rate
+            self._recorder = None
+            self.notify(str(exc), severity="error", timeout=8)
+            return
+        self._recorder = rec
+        self._set_mic_button(recording=True)
+        self.notify("Listening… click the mic again to transcribe.", timeout=4)
+
+    def _stop_recording_and_transcribe(self) -> None:
+        rec, self._recorder = self._recorder, None
+        self._set_mic_button(recording=False)
+        if rec is None:
+            return
+        try:
+            audio = rec.stop()
+        except Exception as exc:  # noqa: BLE001
+            self.notify(f"Mic error: {exc}", severity="error")
+            return
+        if audio is None or len(audio) == 0:
+            self.notify("No audio captured.", severity="warning")
+            return
+        self.notify("Transcribing…", timeout=3)
+        self.run_worker(self._transcribe_worker(audio), group="voice-stt", exclusive=True)
+
+    async def _transcribe_worker(self, audio) -> None:
+        model = self.app.config.settings.voice_stt_model or voice.DEFAULT_STT_MODEL
+        try:
+            text = await asyncio.to_thread(voice.transcribe, audio, model)
+        except Exception as exc:  # noqa: BLE001 — backend/model error
+            self.notify(f"Transcription failed: {exc}", severity="error", timeout=10)
+            return
+        text = (text or "").strip()
+        if not text:
+            self.notify("Didn't catch that — try again.", severity="warning")
+            return
+        prompt = self.query_one("#prompt", PromptArea)
+        existing = prompt.text
+        joiner = " " if existing and not existing.endswith((" ", "\n")) else ""
+        prompt.load_text(existing + joiner + text)
+        prompt.focus()
+        if self.app.config.settings.voice_autosend:
+            self.action_send()
+
+    def _set_mic_button(self, *, recording: bool) -> None:
+        try:
+            btn = self.query_one("#mic-btn", Button)
+        except Exception:  # noqa: BLE001 — not mounted
+            return
+        btn.label = "■ Listening…" if recording else "🎙 Mic"
+        btn.set_class(recording, "-recording")
+
+    # --- voice: read aloud (text-to-speech) ------------------------------
+
+    @on(Button.Pressed, "#read-aloud")
+    def _read_btn(self) -> None:
+        if self._speaker is not None:
+            self._stop_reading()
+        else:
+            self._start_reading()
+
+    def _last_assistant_text(self) -> str:
+        if not self.chat or not self.chat.messages:
+            return ""
+        for msg in reversed(self.chat.messages):
+            if msg.role == "assistant" and msg.text.strip():
+                return msg.text
+        return ""
+
+    def _start_reading(self) -> None:
+        text = self._last_assistant_text()
+        if not text:
+            self.notify("No reply to read yet.", severity="warning")
+            return
+        if not voice.availability().can_speak:
+            self.notify(f"No text-to-speech available. Install:  {voice.install_command()}",
+                        severity="warning", timeout=10)
+            return
+        if voice.availability().tts_kokoro and not voice.kokoro_models_ready():
+            self.notify("Fetching the Kokoro voice model (~325 MB) on first use…", timeout=6)
+        self._speak(text)
+
+    def _speak(self, text: str) -> None:
+        sp = voice.Speaker(text, self.app.config.settings.voice_tts_voice or voice.DEFAULT_TTS_VOICE)
+        self._speaker = sp
+        self._set_read_button(reading=True)
+        self.run_worker(self._speak_worker(sp), group="voice-tts", exclusive=True)
+
+    async def _speak_worker(self, sp) -> None:
+        try:
+            await asyncio.to_thread(sp.run)
+        except Exception as exc:  # noqa: BLE001
+            self.notify(f"Couldn't read it aloud: {exc}", severity="error", timeout=8)
+        finally:
+            if self._speaker is sp:
+                self._speaker = None
+            self._set_read_button(reading=False)
+
+    def _stop_reading(self) -> None:
+        sp, self._speaker = self._speaker, None
+        if sp is not None:
+            try:
+                sp.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        self._set_read_button(reading=False)
+
+    def _set_read_button(self, *, reading: bool) -> None:
+        try:
+            btn = self.query_one("#read-aloud", Button)
+        except Exception:  # noqa: BLE001 — not mounted
+            return
+        btn.label = "■ Stop" if reading else "🔊 Read aloud"
+        btn.set_class(reading, "-reading")
+
+    def _maybe_autoread(self) -> None:
+        """After a main-pane reply lands, read it aloud if the user enabled auto-read."""
+        if not getattr(self.app.config.settings, "voice_autoread", False):
+            return
+        if self._speaker is not None:  # already reading something
+            return
+        if not voice.availability().can_speak:
+            return
+        text = self._last_assistant_text()
+        if text:
+            self._speak(text)
 
     @on(Input.Submitted, "#attach")
     def _attach_submit(self, event: Input.Submitted) -> None:
@@ -1767,6 +1929,7 @@ class ChatScreen(Screen):
         except Exception:  # noqa: BLE001
             pass
         self._scroll_end()
+        self._maybe_autoread()
 
     async def _stream_into(self, transcript, client: ChatClient, messages: list, label: str,
                            *, show_reasoning: bool, cancel=None) -> ChatMessage:
@@ -2035,6 +2198,7 @@ class ChatScreen(Screen):
         except Exception:  # noqa: BLE001
             pass
         self._scroll_end()
+        self._maybe_autoread()
 
     async def _exec_tool(self, name: str, args: dict, sessions: dict, router: dict, transcript, fs_root: Optional[str] = None) -> str:
         row, body = self._bubble("▸ tool", "msg-tool",

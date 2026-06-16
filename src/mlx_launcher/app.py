@@ -94,9 +94,13 @@ class MlxLauncherApp(App):
     /* compact, flat secondary actions (sit below the input row) */
     #chat-actions Button { height: 1; min-width: 0; border: none; padding: 0 1; margin: 0 1 0 0; color: $text-muted; background: $panel; }
     #chat-actions Button:hover { color: $text; }
+    /* read-aloud while speaking → accent highlight */
+    #chat-actions Button.-reading { color: $background; background: $accent; text-style: bold; }
     #chat-inputrow { height: auto; padding: 0 1 1 1; }
     #prompt { width: 1fr; height: 6; border: round $panel; border-title-color: $accent; }
     #chat-inputrow Button { margin: 0 0 0 1; }
+    /* mic while recording → red so it reads as "live" */
+    #mic-btn.-recording { color: $background; background: #e06c75; text-style: bold; }
     #chat-chips { height: auto; padding: 1 1; align-vertical: middle; }
     .actions-spacer { width: 1fr; height: 1; }
     .ctx-bar { width: auto; padding: 0; }
