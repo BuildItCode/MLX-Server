@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "mlx-launcher"
 version = "0.1.2"
-description = "A TUI to launch and manage MLX (mlx_lm.server) servers, with Xcode 27 OpenAI-provider + ACP integration."
+description = "LIS (Local Inference Server) — a TUI to launch and manage local model servers (MLX + llama.cpp), with Xcode 27 OpenAI-provider + ACP integration."
 readme = "README.md"
 requires-python = ">=3.10,<3.15"
 license = { text = "MIT" }
@@ -31,8 +31,7 @@ dev = [
 ]
 
 [project.scripts]
-mlx-launcher = "mlx_launcher.app:run"
-mlxs = "mlx_launcher.app:run"
+lis-start = "mlx_launcher.app:run"
 mlx-acp-agent = "mlx_launcher.acp.entry:main"
 
 [tool.hatch.build.targets.wheel]

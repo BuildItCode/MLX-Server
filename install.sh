@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Install MLX Server Launcher (MLXS) as a global command so you can start it from
-# anywhere (like `claude`). Exposes: mlx-launcher, mlxs, mlx-acp-agent.
+# Install LIS (Local Inference Server) as a global command so you can start it from
+# anywhere (like `claude`). Exposes: lis-start, mlx-acp-agent.
 #
 # Tries pipx first (clean isolated global install); if pipx isn't available and
 # can't be bootstrapped, falls back to a local venv + symlinks in ~/.local/bin,
@@ -37,7 +37,7 @@ echo "Using Python: $PYBIN ($("$PYBIN" --version 2>&1))"
 
 finish() {
   echo
-  echo "Done. Start it from anywhere with:  mlxs"
+  echo "Done. Start it from anywhere with:  lis-start"
   echo "(If the command isn't found, open a new terminal so PATH updates take effect.)"
   exit 0
 }
@@ -84,7 +84,7 @@ VENV="$HERE/.venv"
 
 BIN="$HOME/.local/bin"
 mkdir -p "$BIN"
-for cmd in mlx-launcher mlxs mlx-acp-agent; do
+for cmd in lis-start mlx-acp-agent; do
   ln -sf "$VENV/bin/$cmd" "$BIN/$cmd"
   echo "  linked $BIN/$cmd"
 done
@@ -98,4 +98,4 @@ case ":$PATH:" in
     ;;
 esac
 echo
-echo "Done. Start it from anywhere with:  mlxs"
+echo "Done. Start it from anywhere with:  lis-start"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bootstrap (create venv + install) and launch the MLX Server Launcher TUI.
+# Bootstrap (create venv + install) and launch the LIS (Local Inference Server) TUI.
 #   ./run.sh              # launch (installs on first run)
 #   ./run.sh --reinstall  # force a dependency reinstall, then launch
 set -euo pipefail
@@ -42,10 +42,10 @@ if [ "${1:-}" = "--reinstall" ]; then
   shift
 fi
 
-if [ "$reinstall" -eq 1 ] || ! command -v mlx-launcher >/dev/null 2>&1; then
+if [ "$reinstall" -eq 1 ] || ! command -v lis-start >/dev/null 2>&1; then
   echo "Installing dependencies (this runs only when needed) ..."
   python -m pip install --quiet --upgrade pip
   python -m pip install --quiet -e "$HERE"
 fi
 
-exec mlx-launcher "$@"
+exec lis-start "$@"

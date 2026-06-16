@@ -35,7 +35,7 @@ source "$VENV/bin/activate"
 reinstall=0
 if [ "${1:-}" = "--reinstall" ]; then reinstall=1; shift; fi
 
-if [ "$reinstall" -eq 1 ] || ! command -v mlx-launcher >/dev/null 2>&1; then
+if [ "$reinstall" -eq 1 ] || ! command -v lis-start >/dev/null 2>&1; then
   echo "Installing dependencies (this runs only when needed) ..."
   python -m pip install --quiet --upgrade pip
   python -m pip install --quiet -e "$HERE"
@@ -44,4 +44,4 @@ fi
 command -v llama-server >/dev/null 2>&1 \
   || echo "NOTE: llama-server not found — run ./install-linux.sh or install llama.cpp first."
 
-exec mlx-launcher "$@"
+exec lis-start "$@"

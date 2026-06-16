@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install the launcher on Linux with the llama.cpp backend.
 # MLX is Apple-Silicon-only, so on Linux the usable engine is llama.cpp (`llama-server`).
-# This installs the launcher (command: `mlxs`) and best-effort fetches a prebuilt llama-server.
+# This installs the launcher (command: `lis-start`) and best-effort fetches a prebuilt llama-server.
 set -uo pipefail   # no -e: a failed optional step should fall through, not abort
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,7 +42,7 @@ if [ "$installed" -eq 0 ]; then
   [ -d "$VENV" ] || "$PYBIN" -m venv "$VENV"
   "$VENV/bin/python" -m pip install --quiet --upgrade pip
   "$VENV/bin/python" -m pip install --quiet -e "$HERE"
-  for cmd in mlx-launcher mlxs mlx-acp-agent; do
+  for cmd in lis-start mlx-acp-agent; do
     ln -sf "$VENV/bin/$cmd" "$BIN/$cmd"; echo "  linked $BIN/$cmd"
   done
 fi
@@ -94,4 +94,4 @@ case ":$PATH:" in
     echo '    export PATH="$HOME/.local/bin:$PATH"' ;;
 esac
 echo
-echo "Done. Start it from anywhere with:  mlxs"
+echo "Done. Start it from anywhere with:  lis-start"

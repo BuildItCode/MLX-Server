@@ -1,4 +1,4 @@
-# AGENTS.md — working on MLX Server Launcher
+# AGENTS.md — working on LIS (Local Inference Server)
 
 Guidance for AI coding agents and human contributors working on **this repository**. (Not to
 be confused with the per-project `AGENTS.md` the app itself reads when you point a chat at a
@@ -13,9 +13,10 @@ talks HTTP to it.
 
 - **Stack:** Python 3.10–3.14, [Textual](https://textual.textualize.io) (TUI), httpx,
   pydantic v2, and the `mcp`, `ddgs`, `pypdf`, and `agent-client-protocol` (`acp`) libraries.
-- **Entry points** (`pyproject.toml` `[project.scripts]`): `mlxs` / `mlx-launcher`
+- **Entry points** (`pyproject.toml` `[project.scripts]`): `lis-start`
   (`mlx_launcher.app:run`, the TUI) and `mlx-acp-agent` (`mlx_launcher.acp.entry:main`, the
-  stdio ACP agent Xcode launches).
+  stdio ACP agent Xcode launches). The Python package / distribution stays `mlx_launcher`,
+  and the config dir stays `~/.config/mlx-launcher/` (renaming it would orphan user data).
 - **Pure-Python deps only.** The model runtimes (mlx-lm, mlx-vlm, vllm-mlx, llama.cpp) are
   **external binaries** installed separately and resolved on `PATH` — they are never imported.
 

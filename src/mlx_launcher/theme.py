@@ -10,15 +10,15 @@ ACCENT = "#d97757"
 AMBER = "#e6b450"
 
 BANNER = r"""
-███╗   ███╗██╗     ██╗  ██╗
-████╗ ████║██║     ╚██╗██╔╝
-██╔████╔██║██║      ╚███╔╝
-██║╚██╔╝██║██║      ██╔██╗
-██║ ╚═╝ ██║███████╗██╔╝ ██╗
-╚═╝     ╚═╝╚══════╝╚═╝  ╚═╝
+██╗     ██╗███████╗
+██║     ██║██╔════╝
+██║     ██║███████╗
+██║     ██║╚════██║
+███████╗██║███████║
+╚══════╝╚═╝╚══════╝
 """.strip("\n")
 
-TAGLINE = "drag a model · launch a server · wire up Xcode 27"
+TAGLINE = "Local Inference Server · drag a model, launch a server, wire up Xcode 27"
 
 MLX_THEME = Theme(
     name="mlx-dark",

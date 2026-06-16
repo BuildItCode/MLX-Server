@@ -1459,6 +1459,65 @@ def test_effort_chip_cycles_and_reflects_state():
     assert chip.label == "effort: auto" and "hidden" not in chip.classes  # shown for gpt-oss
 
 
+def test_copy_to_clipboard_uses_native_clipboard(monkeypatch):
+    # Textual's base copy_to_clipboard only emits OSC 52 (ignored by macOS Terminal.app);
+    # ours ALSO pipes to a native CLI so selection-copy (Ctrl/Cmd+C) and the ⧉ controls land.
+    import mlx_launcher.app as appmod
+    from textual.app import App as BaseApp
+
+    from mlx_launcher.app import MlxLauncherApp
+
+    monkeypatch.setattr(BaseApp, "copy_to_clipboard", lambda self, t: None)  # skip real OSC-52
+    monkeypatch.setattr(appmod.sys, "platform", "darwin")
+    monkeypatch.setattr(appmod.shutil, "which", lambda name: "/usr/bin/" + name)
+    calls = []
+    monkeypatch.setattr(appmod.subprocess, "run", lambda cmd, **k: calls.append((cmd, k.get("input"))))
+
+    app = MlxLauncherApp.__new__(MlxLauncherApp)
+    app.copy_to_clipboard("hello selection")
+    assert calls and calls[0][0][0].endswith("pbcopy") and calls[0][1] == b"hello selection"
+
+
+def test_select_part_of_a_reply_and_copy_it(tmp_path, monkeypatch):
+    # the user-facing ask: drag to select PART of a model reply, then Ctrl/Cmd+C copies it.
+    # Needs the prose rendered as a selectable Markdown WIDGET (a Static+Rich-Markdown is NOT
+    # selectable) + the native-clipboard copy.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    import asyncio
+
+    from textual.events import MouseDown, MouseMove, MouseUp
+
+    from mlx_launcher.app import MlxLauncherApp
+    from mlx_launcher.chat.models import ChatMessage
+    from mlx_launcher.screens.chat import ChatScreen
+
+    captured = []
+
+    async def go():
+        app = MlxLauncherApp()
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause(0.2)
+            await app.push_screen(ChatScreen())
+            await pilot.pause(0.3)
+            scr = app.screen
+            app.copy_to_clipboard = lambda t: captured.append(t)  # capture what Ctrl/Cmd+C copies
+            scr.chat.messages.append(ChatMessage(role="assistant", text="The quick brown fox jumps over the lazy dog."))
+            scr._render_transcript()
+            await pilot.pause(0.2)
+            body = scr.query("#transcript Markdown.msg-body").first()
+            await pilot._post_mouse_events([MouseDown], body, offset=(2, 0), button=1)
+            for x in (6, 10, 14, 18):
+                await pilot._post_mouse_events([MouseMove], body, offset=(x, 0), button=1)
+            await pilot._post_mouse_events([MouseUp], body, offset=(18, 0), button=1)
+            await pilot.pause(0.05)
+            sel = scr.get_selected_text()
+            scr.action_copy_text()  # what Ctrl+C / Cmd+C triggers
+            assert sel and sel.strip(), "drag produced no selection (prose isn't selectable)"
+            assert captured and captured[0] == sel, "copy did not get the selection"
+
+    asyncio.run(go())
+
+
 def test_linkify_urls_wraps_only_bare_urls():
     from mlx_launcher.chat.blocks import linkify_urls
 

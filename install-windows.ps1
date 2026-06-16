@@ -1,6 +1,6 @@
 # Install the launcher on Windows with the llama.cpp backend.
 # MLX is Apple-Silicon-only, so on Windows the usable engine is llama.cpp (llama-server.exe).
-# This installs the launcher (command: mlxs) and best-effort fetches a prebuilt llama-server.exe.
+# This installs the launcher (command: lis-start) and best-effort fetches a prebuilt llama-server.exe.
 #
 #   powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
 $ErrorActionPreference = "Stop"
@@ -77,4 +77,4 @@ if (Get-Command llama-server -ErrorAction SilentlyContinue) {
 }
 
 Write-Host ""
-Write-Host "Done. Start it from a new terminal with:  mlxs"
+Write-Host "Done. Start it from a new terminal with:  lis-start"

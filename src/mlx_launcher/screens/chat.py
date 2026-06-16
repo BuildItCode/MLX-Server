@@ -33,6 +33,7 @@ from textual.widgets import (
     Label,
     ListItem,
     ListView,
+    Markdown,
     Select,
     Static,
     TextArea,
@@ -885,8 +886,10 @@ class ChatScreen(Screen):
             if block[0] == "code":
                 widgets.append(CodeBlock(block[2], block[1]))
             elif block[1].strip():
-                # linkify_urls makes bare URLs clickable; markdown links already are (on_click)
-                widgets.append(Static(RichMarkdown(linkify_urls(block[1])), classes="msg-body"))
+                # A Markdown WIDGET (not a Static + Rich-Markdown renderable) so the text is
+                # selectable — drag to highlight any part of a reply, then Ctrl/Cmd+C. Links are
+                # clickable too (Markdown.LinkClicked); linkify_urls turns bare URLs into links.
+                widgets.append(Markdown(linkify_urls(block[1]), classes="msg-body"))
         return widgets or [Static("[dim](no content)[/]", classes="msg-body")]
 
     @staticmethod
@@ -1112,6 +1115,12 @@ class ChatScreen(Screen):
                         if val else "Coding mode off")
         self._update_topbar()
         self._persist()
+
+    @on(Markdown.LinkClicked)
+    def _markdown_link_clicked(self, event: Markdown.LinkClicked) -> None:
+        # a link clicked inside a rendered reply → open it in the browser
+        if event.href:
+            self.app.open_url(event.href)
 
     def on_click(self, event: events.Click) -> None:
         # a click on a rendered link (markdown link or a linkified bare URL) → open it

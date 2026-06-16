@@ -27,8 +27,8 @@ if (-not (Test-Path $Venv)) {
 }
 
 $vpy = Join-Path $Venv "Scripts\python.exe"
-$mlx = Join-Path $Venv "Scripts\mlx-launcher.exe"
-if ($Reinstall -or -not (Test-Path $mlx)) {
+$lis = Join-Path $Venv "Scripts\lis-start.exe"
+if ($Reinstall -or -not (Test-Path $lis)) {
   Write-Host "Installing dependencies (this runs only when needed) ..."
   & $vpy -m pip install --quiet --upgrade pip
   & $vpy -m pip install --quiet -e $Here
@@ -38,4 +38,4 @@ if (-not (Get-Command llama-server -ErrorAction SilentlyContinue)) {
   Write-Host "NOTE: llama-server not found - run .\install-windows.ps1 or install llama.cpp first."
 }
 
-& $mlx @args
+& $lis @args

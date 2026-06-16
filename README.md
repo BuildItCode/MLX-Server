@@ -1,4 +1,4 @@
-# MLX Server Launcher (MLXS)
+# LIS — Local Inference Server
 
 A Claude-Code-styled terminal app (TUI) to launch and manage local model servers — then chat
 with them or wire them into Xcode 27. It drives four interchangeable backends:
@@ -8,7 +8,7 @@ with them or wire them into Xcode 27. It drives four interchangeable backends:
 (`llama-server`, GGUF models) on **macOS, Linux, or Windows**.
 
 <p align="center">
-  <img src="preview.png" alt="MLXS chat UI — projects/chats sidebar, skill and server pickers, context bar, and plan/reason/web/tools toggles" width="820">
+  <img src="preview.png" alt="LIS chat UI — projects/chats sidebar, skill and server pickers, context bar, and plan/reason/web/tools toggles" width="820">
 </p>
 
 - **Pick the engine** per profile: **mlx-lm** (text), **mlx-vlm** (vision-language),
@@ -72,13 +72,25 @@ engine binaries are on your `PATH` and offers to install the ones you're missing
 ./install.sh                                                     # macOS
 ./install-linux.sh                                              # Linux
 powershell -ExecutionPolicy Bypass -File .\install-windows.ps1   # Windows
-mlxs                                                            # then launch from anywhere
+lis-start                                                            # then launch from anywhere
 ```
 
 Each script installs the launcher (pipx if available, else a local `.venv` + `~/.local/bin`
-symlinks) and exposes the `mlxs` command. The **Linux** and **Windows** scripts also fetch a
+symlinks) and exposes the `lis-start` command. The **Linux** and **Windows** scripts also fetch a
 prebuilt **`llama-server`** from the llama.cpp releases — MLX is Apple-Silicon-only, so
 llama.cpp is the engine on those platforms.
+
+## Uninstall
+
+```sh
+./uninstall.sh                                                   # macOS / Linux
+powershell -ExecutionPolicy Bypass -File .\uninstall-windows.ps1  # Windows
+```
+
+Removes the global command — both the old `mlxs` / `mlx-launcher` and the new `lis-start` —
+along with the pipx install and the local `.venv`. Your server profiles and chats
+(`~/.config/mlx-launcher/`) are kept; add `--purge` (`-Purge` on Windows) to delete those too.
+The model engines (MLX / llama.cpp) are left installed.
 
 ## Requirements
 

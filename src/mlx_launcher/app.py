@@ -18,9 +18,26 @@ from .server.manager import ServerManager
 from .theme import MLX_THEME
 
 
+def _clipboard_cmd() -> Optional[list[str]]:
+    """Argv for a local CLI that reliably sets the system clipboard (so copy works even
+    where OSC 52 is ignored — notably macOS Terminal.app), or None if none is available."""
+    if sys.platform == "darwin":
+        p = shutil.which("pbcopy")
+        return [p] if p else None
+    if sys.platform == "win32":
+        p = shutil.which("clip")
+        return [p] if p else None
+    for cmd, args in (("wl-copy", []), ("xclip", ["-selection", "clipboard"]),
+                      ("xsel", ["--clipboard", "--input"])):
+        p = shutil.which(cmd)
+        if p:
+            return [p, *args]
+    return None
+
+
 class MlxLauncherApp(App):
-    TITLE = "MLXS"
-    SUB_TITLE = ""
+    TITLE = "LIS"
+    SUB_TITLE = "Local Inference Server"
 
     CSS = """
     .section { color: $accent; text-style: bold; padding: 1 1 0 1; }
@@ -95,7 +112,11 @@ class MlxLauncherApp(App):
     .msg-spacer { width: 1fr; height: auto; }
     .msg { height: auto; width: 80%; max-width: 80%; margin: 1 0 0 0; padding: 0 0 0 1; border-left: solid $panel; }
     .msg-role { text-style: bold; width: auto; }
-    .msg-body { height: auto; }
+    .msg-body { height: auto; padding: 0; }
+    /* assistant prose is a Markdown widget (so it's selectable) — strip its default chrome */
+    Markdown.msg-body { background: transparent; margin: 0; padding: 0; }
+    Markdown.msg-body MarkdownBlock { margin: 0; padding: 0; }
+    Markdown.msg-body MarkdownParagraph { margin: 0 0 1 0; }
     /* model + thinking: fill up to 80% so markdown/code has room */
     .msg-assistant { border-left: solid $primary; }
     .msg-assistant .msg-role { color: $primary; }
@@ -210,24 +231,28 @@ class MlxLauncherApp(App):
 
     # --- clipboard -------------------------------------------------------
 
-    def copy_text(self, text: str) -> bool:
-        """Copy text to the system clipboard. Returns True if it definitely landed.
+    def copy_to_clipboard(self, text: str) -> None:
+        """Copy text to the system clipboard. Used by BOTH our ⧉ Copy controls AND
+        Textual's built-in **text selection** — drag to highlight any part of a reply,
+        then press Ctrl+C / Cmd+C (`screen.copy_text` → `action_copy_text` calls this).
 
-        Textual's `copy_to_clipboard` emits OSC 52 escape sequences, which many
-        terminals — notably macOS Terminal.app — silently ignore, so the paste
-        never happens even though we showed "Copied". On macOS we also pipe to
-        `pbcopy`, which always works for a local session; OSC 52 still covers
-        `textual serve` / remote terminals that do support it.
-        """
-        self.copy_to_clipboard(text)
-        clip = shutil.which("pbcopy") if sys.platform == "darwin" else None
-        if clip:
+        Textual's base only emits OSC 52, which macOS Terminal.app (and some others)
+        silently ignore — so we ALSO pipe to a native clipboard CLI (pbcopy / clip /
+        wl-copy / xclip) for a local session. OSC 52 still covers `textual serve` and
+        remote terminals that support it."""
+        super().copy_to_clipboard(text)  # OSC 52
+        cmd = _clipboard_cmd()
+        if cmd:
             try:
-                subprocess.run([clip], input=text.encode(), check=True, timeout=5)
-                return True
+                subprocess.run(cmd, input=text.encode(), check=True, timeout=5)
             except (OSError, subprocess.SubprocessError):
                 pass
-        return False
+
+    def copy_text(self, text: str) -> bool:
+        """Back-compat helper for our copy affordances — delegates to copy_to_clipboard
+        (which now also drives the native clipboard)."""
+        self.copy_to_clipboard(text)
+        return True
 
     # --- server manager registry ----------------------------------------
 
