@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import json
-import os
-import time
 from pathlib import Path
 from typing import Optional
 
-from ..config.store import config_dir
+from ..config.store import atomic_write_text, backup_aside, config_dir
 from .models import Chat, ChatStoreFile, McpServer, Project, Subagent
 
 
@@ -34,10 +32,7 @@ def load() -> ChatStoreFile:
 
 
 def _backup(path: Path) -> None:
-    try:
-        path.rename(path.with_name(f"chats.corrupt-{int(time.time())}.json"))
-    except Exception:  # noqa: BLE001
-        pass
+    backup_aside(path, "chats.corrupt")
 
 
 def _salvage(data) -> ChatStoreFile:
@@ -64,18 +59,8 @@ def _salvage(data) -> ChatStoreFile:
 
 
 def save(data: ChatStoreFile) -> Path:
-    d = config_dir()
-    d.mkdir(parents=True, exist_ok=True)
     path = chats_path()
-    tmp = path.with_name(path.name + ".tmp")
-    # flush + fsync before the atomic rename so a crash/power-loss can't leave the temp
-    # (and thus the renamed file) truncated — os.replace alone doesn't guarantee the data
-    # blocks are on disk before the directory entry is swapped.
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(data.model_dump_json(indent=2))
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    atomic_write_text(path, data.model_dump_json(indent=2))
     return path
 
 

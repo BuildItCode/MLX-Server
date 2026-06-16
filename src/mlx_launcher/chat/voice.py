@@ -17,10 +17,7 @@ return availability info or raise :class:`VoiceError` with an actionable message
 
 from __future__ import annotations
 
-import contextlib
 import importlib.util
-import os
-import platform
 import re
 import shutil
 import subprocess
@@ -30,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from .._util import is_apple_silicon, silence_native_stderr
 from ..config.store import config_dir
 
 # Whisper wants 16 kHz mono; Kokoro emits 24 kHz. (Kokoro reports its own rate at runtime.)
@@ -58,41 +56,6 @@ class VoiceError(RuntimeError):
     """A voice operation failed (missing backend, mic error, download error, …)."""
 
 
-@contextlib.contextmanager
-def _silence_stderr_fd():
-    """Mute the OS-level stderr fd for the duration. mlx_whisper's first-use model download is
-    xet-backed, and hf_xet (Rust) prints progress + an "unauthenticated" notice straight to fd 2,
-    bypassing Python — which would glitch the TUI. Runs in the transcription worker thread; the
-    screen renders on stdout, so this is safe and the fd is always restored."""
-    saved = None
-    devnull = None
-    try:
-        saved = os.dup(2)
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, 2)
-    except Exception:  # noqa: BLE001
-        if saved is not None:  # don't leak the duped fd if open/dup2 failed
-            try:
-                os.close(saved)
-            except Exception:  # noqa: BLE001
-                pass
-            saved = None
-    finally:
-        if devnull is not None:
-            try:
-                os.close(devnull)
-            except Exception:  # noqa: BLE001
-                pass
-    try:
-        yield
-    finally:
-        if saved is not None:
-            try:
-                os.dup2(saved, 2)
-            finally:
-                os.close(saved)
-
-
 # --- capability probing ---------------------------------------------------
 
 def _have(module: str) -> bool:
@@ -101,10 +64,6 @@ def _have(module: str) -> bool:
         return importlib.util.find_spec(module) is not None
     except Exception:  # noqa: BLE001 — a broken namespace package shouldn't crash the probe
         return False
-
-
-def is_apple_silicon() -> bool:
-    return sys.platform == "darwin" and platform.machine() == "arm64"
 
 
 _tqdm_lock_set = False
@@ -266,7 +225,7 @@ def transcribe(audio, model_setting: str = DEFAULT_STT_MODEL) -> str:
     if is_apple_silicon() and _have("mlx_whisper"):
         import mlx_whisper
 
-        with _silence_stderr_fd():  # mute hf_xet's first-download progress/warning on fd 2
+        with silence_native_stderr():  # mute hf_xet's first-download progress/warning on fd 2
             result = mlx_whisper.transcribe(audio, path_or_hf_repo=_mlx_whisper_repo(model_setting))
         return (result.get("text") or "").strip()
 
@@ -276,7 +235,7 @@ def transcribe(audio, model_setting: str = DEFAULT_STT_MODEL) -> str:
 
         size = model_setting if "/" not in (model_setting or "") else "base"
         size = (size or "base").strip() or "base"
-        with _silence_stderr_fd():
+        with silence_native_stderr():
             if _faster_model is None or getattr(_faster_model, "_lis_size", None) != size:
                 _faster_model = WhisperModel(size, device="cpu", compute_type="int8")
                 _faster_model._lis_size = size  # type: ignore[attr-defined]

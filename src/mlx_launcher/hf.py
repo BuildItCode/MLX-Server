@@ -15,14 +15,14 @@ fraction of total RAM.
 
 from __future__ import annotations
 
-import contextlib
 import os
-import platform
 import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from typing import Callable, Literal, Optional
+
+from ._util import is_apple_silicon, silence_native_stderr
 
 Format = Literal["gguf", "mlx"]
 
@@ -94,41 +94,6 @@ def _token() -> Optional[str]:
         return _hf().get_token()
     except Exception:  # noqa: BLE001
         return None
-
-
-@contextlib.contextmanager
-def _silence_native_stderr():
-    """Redirect the OS-level stderr fd to /dev/null for the duration. The hf_xet (Rust)
-    transfer layer prints an "unauthenticated requests" notice straight to fd 2, bypassing
-    Python logging — which would glitch the TUI. Downloads run in a worker thread and the
-    screen renders on stdout, so briefly muting fd 2 here is safe; the fd is always restored."""
-    saved = None
-    devnull = None
-    try:
-        saved = os.dup(2)
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, 2)
-    except Exception:  # noqa: BLE001 — if dup/dup2 isn't available, just don't silence
-        if saved is not None:  # don't leak the duped fd if open/dup2 failed
-            try:
-                os.close(saved)
-            except Exception:  # noqa: BLE001
-                pass
-            saved = None
-    finally:
-        if devnull is not None:
-            try:
-                os.close(devnull)
-            except Exception:  # noqa: BLE001
-                pass
-    try:
-        yield
-    finally:
-        if saved is not None:
-            try:
-                os.dup2(saved, 2)
-            finally:
-                os.close(saved)
 
 
 def _explain(exc: Exception) -> str:
@@ -249,7 +214,7 @@ def exact_to_fetch_bytes(repo_id: str, *, allow_patterns: Optional[list[str]] = 
     Returns None if the dry-run API isn't available. Blocking."""
     hub = _hf()
     try:
-        with _silence_native_stderr():
+        with silence_native_stderr():
             plan = hub.snapshot_download(
                 repo_id, dry_run=True, allow_patterns=allow_patterns, token=_token(),
                 tqdm_class=_progress_tqdm(lambda _line: None, None),  # silent — no stray bar under the TUI
@@ -293,10 +258,6 @@ def total_ram_bytes() -> Optional[int]:
     except Exception:  # noqa: BLE001
         return None
     return None
-
-
-def is_apple_silicon() -> bool:
-    return sys.platform == "darwin" and platform.machine() == "arm64"
 
 
 def recommended_budget_bytes() -> Optional[int]:
@@ -393,7 +354,7 @@ def download_model(
     # aggregate tqdm is a plain tqdm subclass and is unaffected by this flag.
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     try:
-        with _silence_native_stderr():
+        with silence_native_stderr():
             path = hub.snapshot_download(
                 repo_id, allow_patterns=allow_patterns, token=_token(),
                 tqdm_class=_progress_tqdm(on_progress, cancel),

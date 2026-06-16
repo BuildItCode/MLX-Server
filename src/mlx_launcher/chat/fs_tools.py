@@ -12,10 +12,9 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
-import signal
-import subprocess
-import sys
 from pathlib import Path
+
+from .._util import kill_process_group, process_group_kwargs
 
 MAX_READ_BYTES = 64_000
 MAX_OUTPUT = 8_000
@@ -162,24 +161,11 @@ def _delete_path(root: str, rel: str) -> str:
     return f"deleted {rel}"
 
 
-def _kill_tree(proc: asyncio.subprocess.Process) -> None:
-    """Kill a run_command subprocess and its children (POSIX group SIGKILL; `taskkill` on Windows)."""
-    try:
-        if sys.platform == "win32":
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                           capture_output=True, check=False)
-        else:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
-
-
 async def _run_command(root: str, command: str) -> str:
     if not command.strip():
         return "empty command"
     # own process group so a timeout can kill the whole tree (POSIX session / Windows group)
-    spawn = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
-             if sys.platform == "win32" else {"start_new_session": True})
+    spawn = process_group_kwargs()
     proc = await asyncio.create_subprocess_shell(
         command,
         cwd=str(_root(root)),
@@ -191,7 +177,7 @@ async def _run_command(root: str, command: str) -> str:
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=COMMAND_TIMEOUT)
     except asyncio.TimeoutError:
-        _kill_tree(proc)
+        kill_process_group(proc)
         try:  # reap so we don't leave a zombie
             await asyncio.wait_for(proc.wait(), timeout=5.0)
         except asyncio.TimeoutError:

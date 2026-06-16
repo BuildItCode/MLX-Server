@@ -29,6 +29,28 @@ def config_path() -> Path:
     return config_dir() / "servers.json"
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write `text` to `path` atomically: temp file → flush + fsync → os.replace. The fsync
+    before the rename makes the data durable before the directory entry is swapped, so a
+    crash/power-loss can't leave a truncated file. Shared by both JSON stores."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def backup_aside(path: Path, prefix: str) -> None:
+    """Best-effort: move an unreadable file aside as `<prefix>-<unixtime>.json` so the user can
+    recover it before we start fresh / salvage."""
+    try:
+        path.rename(path.with_name(f"{prefix}-{int(time.time())}.json"))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def load() -> ConfigFile:
     path = config_path()
     if not path.exists():
@@ -48,11 +70,7 @@ def load() -> ConfigFile:
 
 
 def _backup(path: Path) -> None:
-    """Best-effort: move the unreadable file aside so the user can recover it."""
-    try:
-        path.rename(path.with_name(f"servers.corrupt-{int(time.time())}.json"))
-    except Exception:  # noqa: BLE001
-        pass
+    backup_aside(path, "servers.corrupt")
 
 
 def _salvage(data) -> ConfigFile:
@@ -75,18 +93,8 @@ def _salvage(data) -> ConfigFile:
 
 
 def save(cfg: ConfigFile) -> Path:
-    d = config_dir()
-    d.mkdir(parents=True, exist_ok=True)
     path = config_path()
-    tmp = path.with_name(path.name + ".tmp")
-    # flush + fsync before the atomic rename so a crash/power-loss can't leave the temp
-    # (and thus the renamed file) truncated — os.replace alone doesn't guarantee the data
-    # blocks are on disk before the directory entry is swapped.
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(cfg.model_dump_json(indent=2))
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    atomic_write_text(path, cfg.model_dump_json(indent=2))
     return path
 
 

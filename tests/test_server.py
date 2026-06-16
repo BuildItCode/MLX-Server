@@ -117,16 +117,16 @@ def test_exit_message_gguf_load_error():
 
 
 def test_spawn_kwargs_per_platform(monkeypatch):
-    # the server must spawn into its own group on every OS: POSIX session / Windows group
-    import mlx_launcher.server.manager as m
+    # a child must spawn into its own group on every OS: POSIX session / Windows group
+    import mlx_launcher._util as u
 
-    monkeypatch.setattr(m.sys, "platform", "linux")
-    assert m._spawn_kwargs() == {"start_new_session": True}
+    monkeypatch.setattr(u.sys, "platform", "linux")
+    assert u.process_group_kwargs() == {"start_new_session": True}
 
-    monkeypatch.setattr(m.sys, "platform", "win32")
+    monkeypatch.setattr(u.sys, "platform", "win32")
     # CREATE_NEW_PROCESS_GROUP doesn't exist on this (non-Windows) host — patch it in
-    monkeypatch.setattr(m.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
-    assert m._spawn_kwargs() == {"creationflags": 0x200}
+    monkeypatch.setattr(u.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    assert u.process_group_kwargs() == {"creationflags": 0x200}
 
 
 def test_is_alive_windows_uses_returncode_not_os_kill(monkeypatch):
@@ -150,13 +150,12 @@ def test_is_alive_windows_uses_returncode_not_os_kill(monkeypatch):
 
 
 def test_terminate_and_kill_route_per_platform_on_windows(monkeypatch):
-    import mlx_launcher.server.manager as m
-    from mlx_launcher.server.manager import ServerManager
+    import mlx_launcher._util as u
 
-    monkeypatch.setattr(m.sys, "platform", "win32")
-    monkeypatch.setattr(m.os, "killpg", lambda *a: (_ for _ in ()).throw(AssertionError("killpg on win32")))
+    monkeypatch.setattr(u.sys, "platform", "win32")
+    monkeypatch.setattr(u.os, "killpg", lambda *a: (_ for _ in ()).throw(AssertionError("killpg on win32")))
     taskkilled = []
-    monkeypatch.setattr(m.subprocess, "run", lambda argv, **k: taskkilled.append(argv))
+    monkeypatch.setattr(u.subprocess, "run", lambda argv, **k: taskkilled.append(argv))
 
     class FakeProc:
         pid = 99
@@ -164,9 +163,9 @@ def test_terminate_and_kill_route_per_platform_on_windows(monkeypatch):
         def terminate(self): self.terminated = True
 
     p = FakeProc()
-    ServerManager._terminate_proc(p)
+    u.terminate_process_group(p)
     assert p.terminated is True                              # graceful → proc.terminate()
-    ServerManager._kill_proc(p)
+    u.kill_process_group(p)
     assert taskkilled and taskkilled[0][:2] == ["taskkill", "/F"]  # force → taskkill /F /T
 
 

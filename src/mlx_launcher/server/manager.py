@@ -13,13 +13,12 @@ import asyncio
 import itertools
 import os
 import re
-import signal
-import subprocess
 import sys
 from collections import deque
 from enum import Enum
 from typing import Callable, Optional
 
+from .._util import kill_process_group, process_group_kwargs, terminate_process_group
 from ..config.flags import build_argv
 from ..config.models import ServerConfig
 from . import discovery
@@ -44,14 +43,6 @@ class PortInUse(Exception):
 
 LogCb = Callable[[str, str], None]  # (stream_name, line)
 StatusCb = Callable[[ServerStatus, str], None]  # (status, message)
-
-
-def _spawn_kwargs() -> dict:
-    """Subprocess kwargs that put the server in its own process group, so we can kill the
-    whole tree on stop. POSIX uses a new session; Windows a new process group."""
-    if sys.platform == "win32":
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
-    return {"start_new_session": True}
 
 
 class ServerManager:
@@ -157,7 +148,7 @@ class ServerManager:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=os.environ.copy(),
-            **_spawn_kwargs(),  # own process group → clean tree kill (POSIX + Windows)
+            **process_group_kwargs(),  # own process group → clean tree kill (POSIX + Windows)
         )
         self._stopping = False
         self._tasks = [
@@ -244,11 +235,11 @@ class ServerManager:
             self._set_status(ServerStatus.STOPPED, "server stopped")
             self._cancel_tasks()
             return
-        self._terminate_proc(proc)
+        terminate_process_group(proc)
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
         except asyncio.TimeoutError:
-            self._kill_proc(proc)
+            kill_process_group(proc)
             try:
                 await asyncio.wait_for(proc.wait(), timeout=3.0)
             except asyncio.TimeoutError:
@@ -260,7 +251,7 @@ class ServerManager:
         self._stopping = True
         proc = self.proc
         if proc is not None and proc.returncode is None:
-            self._terminate_proc(proc)
+            terminate_process_group(proc)
 
     def is_alive(self) -> bool:
         """Liveness checked via the OS — works even when the event loop is no longer
@@ -298,31 +289,7 @@ class ServerManager:
         self._stopping = True
         proc = self.proc
         if proc is not None:
-            self._kill_proc(proc)
-
-    @staticmethod
-    def _terminate_proc(proc: asyncio.subprocess.Process) -> None:
-        """Graceful stop of the server's process group: SIGTERM the POSIX group, or
-        `terminate()` on Windows (no POSIX signals / process groups there)."""
-        try:
-            if sys.platform == "win32":
-                proc.terminate()
-            else:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-
-    @staticmethod
-    def _kill_proc(proc: asyncio.subprocess.Process) -> None:
-        """Force-kill the whole tree: SIGKILL the POSIX group, or `taskkill /T` on Windows."""
-        try:
-            if sys.platform == "win32":
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                               capture_output=True, check=False)
-            else:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
+            kill_process_group(proc)
 
     def _cancel_tasks(self) -> None:
         for t in self._tasks:
