@@ -43,9 +43,13 @@ from ..widgets.path_input import DropPathInput, PathInput, path_hint, resolve_pa
 _LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 _ENGINE_HINTS = {
-    "mlx-lm": "Text LLMs via mlx_lm.server.",
-    "mlx-vlm": "Vision-language (and text) models via mlx_vlm.server — supports a quantized KV cache.",
-    "vllm-mlx": "vLLM-style MLX server (vllm-mlx serve): continuous batching, prefix cache, native tools, 4/8-bit KV cache.",
+    "mlx-lm": "Text LLMs via mlx_lm.server — the fastest engine, but no server-side tool-call "
+              "parsing. For models that need reliable tool/coding use, switch to vllm-mlx.",
+    "mlx-vlm": "Vision-language (and text) models via mlx_vlm.server — supports a quantized KV cache. "
+               "No server-side tool-call parsing (use vllm-mlx if you need reliable tools).",
+    "vllm-mlx": "vLLM-style MLX server (vllm-mlx serve): native tool-calling and the broadest model "
+                "support, plus continuous batching and 4/8-bit KV cache. Slower than mlx-lm — pick it "
+                "when you need tools to work.",
     "llama-cpp": "GGUF via llama.cpp (llama-server) — a .gguf file, its model folder (LM Studio dir), or an HF repo (org/repo:quant). A sibling vision projector (mmproj) loads automatically.",
 }
 

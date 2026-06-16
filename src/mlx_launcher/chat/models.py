@@ -28,7 +28,7 @@ class Attachment(BaseModel):
 class ChatMessage(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    role: Literal["user", "assistant", "system"]
+    role: Literal["user", "assistant", "system", "tool"]
     text: str = ""
     reasoning: str = ""  # stored "thinking" content, if any
     attachments: list[Attachment] = Field(default_factory=list)
@@ -37,6 +37,11 @@ class ChatMessage(BaseModel):
     tps: Optional[float] = None
     n_tokens: Optional[int] = None
     elapsed: Optional[float] = None
+    # agentic tool steps, persisted so a follow-up turn ("continue") keeps the work context.
+    # On an assistant turn: the calls it made, as [{"name": str, "arguments": dict}, ...].
+    # On a `tool` turn: the result, with tool_name naming the tool that produced it.
+    tool_calls: Optional[list[dict]] = None
+    tool_name: Optional[str] = None
 
 
 class Chat(BaseModel):

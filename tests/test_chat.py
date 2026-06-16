@@ -200,6 +200,82 @@ def test_prepend_system_never_emits_two_system_messages():
     assert [m["role"] for m in msgs2].count("system") == 1
 
 
+def test_chatmessage_persists_tool_fields():
+    from mlx_launcher.chat.models import ChatMessage
+
+    tool = ChatMessage(role="tool", tool_name="read_file", text="data")
+    assert ChatMessage.model_validate(tool.model_dump()).tool_name == "read_file"
+    call = ChatMessage(role="assistant", text="", tool_calls=[{"name": "x", "arguments": {"k": 1}}])
+    round_tripped = ChatMessage.model_validate(call.model_dump())
+    assert round_tripped.tool_calls[0] == {"name": "x", "arguments": {"k": 1}}
+
+
+def test_tool_steps_round_trip_into_history():
+    # The agentic loop persists its tool exchange; build_openai_messages must replay it as the
+    # universal text protocol so a follow-up turn keeps the work context.
+    from mlx_launcher.chat.client import build_openai_messages
+    from mlx_launcher.chat.models import Chat, ChatMessage
+
+    chat = Chat(messages=[
+        ChatMessage(role="user", text="add a flag"),
+        ChatMessage(role="assistant", text="",  # pure tool-call turn (no prose)
+                    tool_calls=[{"name": "read_file", "arguments": {"path": "a.py"}},
+                                {"name": "read_file", "arguments": {"path": "b.py"}}]),
+        ChatMessage(role="tool", tool_name="read_file", text="AAA"),
+        ChatMessage(role="tool", tool_name="read_file", text="BBB"),
+        ChatMessage(role="assistant", text="Done."),
+    ])
+    msgs = build_openai_messages(chat)
+
+    # the tool-call turn carries the calls as <tool_call> tags (no prose ⇒ just the tags)
+    call_turn = next(m for m in msgs if m["role"] == "assistant" and "<tool_call>" in m["content"])
+    assert call_turn["content"].startswith("<tool_call>")
+    assert '"name": "read_file"' in call_turn["content"] and '"path": "a.py"' in call_turn["content"]
+    # the two tool results render as <tool_response> and coalesce into ONE user turn (so the
+    # original "add a flag" ask + the merged results = 2 user turns, not 3)
+    user_turns = [m for m in msgs if m["role"] == "user"]
+    assert len(user_turns) == 2
+    results = next(m["content"] for m in user_turns if "<tool_response" in m["content"])
+    assert "AAA" in results and "BBB" in results
+
+
+def test_continue_keeps_tool_context_and_coalesces():
+    # The reported bug: typing "continue" made the model re-read everything. With the exchange
+    # persisted, the prior read is still in context, and the dangling tool result + "continue"
+    # merge into one user turn (strict alternating templates 500 on two consecutive user turns).
+    from mlx_launcher.chat.client import build_openai_messages
+    from mlx_launcher.chat.models import Chat, ChatMessage
+
+    chat = Chat(messages=[
+        ChatMessage(role="user", text="go"),
+        ChatMessage(role="assistant", text="", tool_calls=[{"name": "read_file", "arguments": {"path": "x.py"}}]),
+        ChatMessage(role="tool", tool_name="read_file", text="SECRET_CONTENTS"),
+        ChatMessage(role="user", text="continue"),
+    ])
+    msgs = build_openai_messages(chat)
+    assert [m["role"] for m in msgs] == ["user", "assistant", "user"]  # result + continue merged
+    blob = "\n".join(m["content"] for m in msgs)
+    assert "SECRET_CONTENTS" in blob  # the file it already read is still in context
+    assert msgs[-1]["content"].endswith("continue")
+
+
+def test_scaled_max_tokens(monkeypatch):
+    from mlx_launcher.chat import client as cl
+
+    # 128k model: an explicit KV cap → ~1/4 of it; no cap → ~1/6 of the model max
+    monkeypatch.setattr(cl.capabilities, "context_window", lambda m: 131072)
+    assert cl.scaled_max_tokens("m", context_cap=32768) == 8192          # 1/4 of the cap
+    assert cl.scaled_max_tokens("m", context_cap=None) == 131072 // 6     # 1/6 of model max
+    # a cap is bounded by the model max, and the ceiling bounds a huge cap
+    assert cl.scaled_max_tokens("m", context_cap=10**9) == 32768         # min(131072//4, 65536)
+    # tiny context → the floor keeps a reasoning model from being starved
+    monkeypatch.setattr(cl.capabilities, "context_window", lambda m: 12000)
+    assert cl.scaled_max_tokens("m", context_cap=8192) == 4096           # max(8192//4, 4096)
+    # unknown context window → the fixed fallback
+    monkeypatch.setattr(cl.capabilities, "context_window", lambda m: None)
+    assert cl.scaled_max_tokens("m") == cl.DEFAULT_MAX_TOKENS
+
+
 def test_safe_content_survives_markup_breaking_text():
     import pytest
     from textual.content import Content
@@ -868,6 +944,53 @@ def test_main_tools_loop_describes_tools_and_runs_text_protocol(tmp_path, monkey
             assert saw["tools"], "tools must be described in the prompt up front"
             assert searched == ["z"], "the text <tool_call> must run web_search"
             assert scr.chat.messages[-1].text == "the answer"
+
+    asyncio.run(go())
+
+
+def test_slash_command_menu(monkeypatch, tmp_path):
+    # Typing "/" opens a command menu that filters as you type; Enter runs the highlighted
+    # command; a space (a real message that merely starts with "/") closes it.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    import asyncio
+
+    from textual.widgets import OptionList
+
+    from mlx_launcher.app import MlxLauncherApp
+    from mlx_launcher.screens.chat import _SLASH_COMMANDS, ChatScreen, PromptArea
+
+    async def go():
+        app = MlxLauncherApp()
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause(0.2)
+            await app.push_screen(ChatScreen())
+            await pilot.pause(0.3)
+            scr = app.screen
+            prompt = scr.query_one("#prompt", PromptArea)
+            sug = scr.query_one("#slash-suggest", OptionList)
+
+            def menu_for(text):  # deterministic: set the text, recompute the menu
+                prompt.load_text(text)
+                scr._update_slash_menu()
+                return [c for c, _ in scr._slash_items], sug.display
+
+            cmds, shown = menu_for("/")
+            assert shown and set(cmds) == _SLASH_COMMANDS   # all commands on a bare "/"
+            assert menu_for("/c")[0] == ["/compact"]        # filters by prefix
+            assert menu_for("/p")[0] == ["/plan"]
+            assert menu_for("/x")[1] is False               # no match → hidden
+            assert menu_for("/plan ")[1] is False           # a space → it's a message, not a command
+            assert menu_for("hello")[1] is False
+            assert menu_for("/plan the rollout")[1] is False
+
+            # key-driven: Enter while the menu is open runs the highlighted command (not "send")
+            menu_for("/p")  # highlights /plan
+            prompt.focus()
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert scr.chat.mode == "plan"            # the command ran
+            assert sug.display is False               # menu closed
+            assert prompt.text == ""                  # prompt cleared, nothing sent
 
     asyncio.run(go())
 

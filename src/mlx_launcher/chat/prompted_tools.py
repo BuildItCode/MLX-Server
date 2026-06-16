@@ -16,6 +16,42 @@ import re
 _TAG_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL | re.IGNORECASE)
 _FENCE_RE = re.compile(r"```(?:json|tool_call)?\s*(\{.*?\})\s*```", re.DOTALL)
 
+# MiniMax-M2 emits its own XML tool-call format (it ignores the Hermes <tool_call> instruction and
+# uses what it was trained on), e.g.
+#     <minimax:tool_call>
+#     <invoke name="read_file"><parameter name="path">app.py</parameter></invoke>
+#     </minimax:tool_call>
+# Multiple <invoke> blocks may appear in one wrapper; parameter values are plain text that may be
+# JSON (arrays/objects) or a bare string. We scan <invoke> globally so a missing/garbled wrapper
+# (some servers drop it) still parses.
+_MINIMAX_BLOCK_RE = re.compile(r"<minimax:tool_call>.*?</minimax:tool_call>", re.DOTALL | re.IGNORECASE)
+_INVOKE_RE = re.compile(r'<invoke\s+name="(?P<name>[^"]+)"\s*>(?P<body>.*?)</invoke>', re.DOTALL | re.IGNORECASE)
+_PARAM_RE = re.compile(r'<parameter\s+name="(?P<name>[^"]+)"\s*>(?P<value>.*?)</parameter>', re.DOTALL | re.IGNORECASE)
+
+
+def _coerce_param(raw: str):
+    """A MiniMax <parameter> value: parsed as JSON when it parses (arrays/objects/numbers/bools),
+    else the literal trimmed string — matching the format's "plain string or JSON" contract."""
+    s = (raw or "").strip()
+    try:
+        return json.loads(s)
+    except ValueError:
+        return s
+
+
+def parse_xml_tool_calls(text: str) -> list[dict]:
+    """[{name, arguments}] from MiniMax-M2's <invoke name=…><parameter name=…>…</invoke> XML.
+    Empty list when the text isn't that shape, so ordinary prose is never misread as a call."""
+    out: list[dict] = []
+    for inv in _INVOKE_RE.finditer(text or ""):
+        name = inv.group("name").strip()
+        if not name:
+            continue
+        args = {p.group("name").strip(): _coerce_param(p.group("value"))
+                for p in _PARAM_RE.finditer(inv.group("body"))}
+        out.append({"name": name, "arguments": args})
+    return out
+
 
 def tool_instructions(specs: list[dict]) -> str:
     """A system-prompt block describing the tools and the call protocol."""
@@ -55,8 +91,8 @@ def _coerce(obj: dict) -> dict | None:
 
 
 def parse_tool_calls(text: str) -> list[dict]:
-    """Extract [{name, arguments}] from a model's text reply. Tolerant of the
-    `<tool_call>` tag and, failing that, a bare fenced JSON object."""
+    """Extract [{name, arguments}] from a model's text reply. Tolerant of the `<tool_call>` tag,
+    a bare fenced JSON object, and MiniMax-M2's `<invoke>` XML form."""
     out: list[dict] = []
     matches = _TAG_RE.findall(text or "") or _FENCE_RE.findall(text or "")
     for raw in matches:
@@ -67,12 +103,15 @@ def parse_tool_calls(text: str) -> list[dict]:
         call = _coerce(obj) if isinstance(obj, dict) else None
         if call:
             out.append(call)
-    return out
+    return out or parse_xml_tool_calls(text)  # fall back to MiniMax's XML tool-call format
 
 
 def strip_tool_calls(text: str) -> str:
-    """Remove the tool-call tags so only the model's prose remains."""
-    return _TAG_RE.sub("", text or "").strip()
+    """Remove the tool-call tags (Hermes <tool_call> and MiniMax XML) so only prose remains."""
+    text = _TAG_RE.sub("", text or "")
+    text = _MINIMAX_BLOCK_RE.sub("", text)
+    text = _INVOKE_RE.sub("", text)  # a stray <invoke> block whose wrapper was dropped
+    return text.strip()
 
 
 def tool_response(name: str, result: str) -> str:

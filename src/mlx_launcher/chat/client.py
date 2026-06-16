@@ -12,7 +12,7 @@ import re
 from typing import AsyncIterator, Callable, Optional
 
 from ..acp.bridge import MlxBridge
-from . import capabilities
+from . import capabilities, prompted_tools
 from .models import Chat, ChatMessage, Project
 
 
@@ -288,9 +288,59 @@ def recover_loose_tool_calls(text: str, tool_names: list[str]) -> list[dict]:
     return out
 
 
+def recover_json_tool_calls(text: str, tool_names: list[str]) -> list[dict]:
+    """Last-resort: bare JSON tool-call objects ``{"name": "<known tool>", "arguments": {…}}``
+    found anywhere in the text — for a model that drifts out of its tagged format into a loose
+    shape like ``[calling tool: {"name": …, "arguments": …}]``. Keyed on KNOWN tool names and
+    requiring an arguments object, so prose / example JSON isn't misread. Empty list when none fit."""
+    names = {n for n in (tool_names or []) if n}
+    if not names:
+        return []
+    out: list[dict] = []
+    dec = json.JSONDecoder()
+    s = text or ""
+    i = 0
+    while True:
+        idx = s.find("{", i)
+        if idx == -1:
+            break
+        try:  # string-aware: a '{' inside a string value won't trip up the scan
+            obj, end = dec.raw_decode(s, idx)
+        except ValueError:
+            i = idx + 1
+            continue
+        i = max(end, idx + 1)
+        if isinstance(obj, dict):
+            name = obj.get("name") or obj.get("tool")
+            args = obj.get("arguments")
+            if args is None:
+                args = obj.get("args") if obj.get("args") is not None else obj.get("parameters")
+            if name in names and isinstance(args, dict):
+                out.append({"name": name, "arguments": args})
+    return out
+
+
+def _render_tool_calls(calls: list[dict]) -> str:
+    """Persisted tool calls → the text-protocol <tool_call> tags the loop understands."""
+    return "\n".join(
+        "<tool_call>" + json.dumps({"name": c.get("name", ""), "arguments": c.get("arguments") or {}})
+        + "</tool_call>"
+        for c in (calls or [])
+    )
+
+
 def _message_to_openai(m: ChatMessage) -> dict:
+    if m.role == "tool":
+        # A persisted tool result → replayed as the text-protocol <tool_response>. Every chat
+        # template renders user turns, so this works regardless of native tool support, and the
+        # loop accepts native/harmony/text calls alike on the way back out.
+        return {"role": "user", "content": prompted_tools.tool_response(m.tool_name or "tool", m.text)}
     if m.role == "assistant":
-        return {"role": "assistant", "content": m.text}
+        content = m.text
+        if m.tool_calls:  # an agentic turn that called tools — keep the calls in the history
+            tags = _render_tool_calls(m.tool_calls)
+            content = f"{content}\n{tags}".strip() if content.strip() else tags
+        return {"role": "assistant", "content": content}
 
     text = m.text
     for att in m.attachments:
@@ -370,13 +420,52 @@ def build_openai_messages(
         msgs.append({"role": "system", "content": "\n\n---\n\n".join(parts)})
     for m in chat.messages:
         msgs.append(_message_to_openai(m))
-    return msgs
+    return _coalesce_roles(msgs)
+
+
+def _coalesce_roles(msgs: list[dict]) -> list[dict]:
+    """Merge adjacent same-role turns with plain-text content into one. The agentic loop
+    persists tool steps as assistant/user turns, which can leave two consecutive user turns
+    (a tool result, then the next user message); strict role-alternating templates (Qwen) 500
+    on that. Multimodal (list) content is never merged."""
+    out: list[dict] = []
+    for m in msgs:
+        prev = out[-1] if out else None
+        if (prev and prev["role"] == m["role"]
+                and isinstance(prev.get("content"), str) and isinstance(m.get("content"), str)):
+            out[-1] = {**prev, "content": f"{prev['content']}\n\n{m['content']}"}
+        else:
+            out.append(dict(m))
+    return out
 
 
 # A reasoning model spends its token budget on the analysis channel *before* the
 # answer, so the server's 512-token default leaves nothing for the reply. Ask for
 # a real budget; a profile's own --max-tokens (if set) overrides this in chat.py.
-DEFAULT_MAX_TOKENS = 16384
+DEFAULT_MAX_TOKENS = 16384  # fallback only — used when the context window can't be determined
+
+# The generation budget scales with the available context instead of a fixed 16k. Bounds keep it
+# sane at the extremes: a reasoning model isn't starved on a small context, and a huge context
+# can't license a turn that generates for minutes.
+_MIN_SCALED_MAX_TOKENS = 4096    # floor: leave room for a reasoning model to actually answer
+_MAX_SCALED_MAX_TOKENS = 65536   # ceiling: bound a single turn (truncation continues across turns)
+
+
+def scaled_max_tokens(model: str, context_cap: Optional[int] = None) -> int:
+    """Per-request ``max_tokens`` scaled to the context window: ~1/4 of an explicit KV-cache / ctx
+    cap the user configured, else ~1/6 of the model's max context. Floored and capped (see above),
+    never larger than the window itself, and DEFAULT_MAX_TOKENS when the window is unknown."""
+    model_max = capabilities.context_window(model)
+    if context_cap:
+        window = min(context_cap, model_max) if model_max else context_cap
+        budget = window // 4
+    elif model_max:
+        window = model_max
+        budget = window // 6
+    else:
+        return DEFAULT_MAX_TOKENS
+    budget = max(_MIN_SCALED_MAX_TOKENS, min(budget, _MAX_SCALED_MAX_TOKENS))
+    return min(budget, window)  # can't generate more than the whole window
 
 
 class ChatClient:

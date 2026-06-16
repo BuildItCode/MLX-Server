@@ -40,3 +40,43 @@ def test_tool_instructions_describe_the_protocol_and_tools():
 
 def test_tool_response_format():
     assert pt.tool_response("read_file", "hello") == '<tool_response name="read_file">\nhello\n</tool_response>'
+
+
+def test_parse_minimax_xml_tool_call():
+    # MiniMax-M2 emits its own XML format (not the Hermes <tool_call> JSON we instruct) — we must
+    # still recognize it, or the call is shown as text and "nothing happens".
+    text = (
+        "Sure, let me check.\n"
+        "<minimax:tool_call>\n"
+        '<invoke name="read_file">\n'
+        '<parameter name="path">src/app.py</parameter>\n'
+        "</invoke>\n"
+        "</minimax:tool_call>"
+    )
+    assert pt.parse_tool_calls(text) == [{"name": "read_file", "arguments": {"path": "src/app.py"}}]
+    assert pt.strip_tool_calls(text) == "Sure, let me check."
+
+
+def test_parse_minimax_multiple_invokes_and_value_coercion():
+    text = (
+        "<minimax:tool_call>\n"
+        '<invoke name="search_web"><parameter name="query_tag">["tech", "events"]</parameter></invoke>\n'
+        '<invoke name="write_file"><parameter name="path">a.py</parameter>'
+        '<parameter name="content">x = 1</parameter></invoke>\n'
+        "</minimax:tool_call>"
+    )
+    assert pt.parse_tool_calls(text) == [
+        {"name": "search_web", "arguments": {"query_tag": ["tech", "events"]}},  # JSON array parsed
+        {"name": "write_file", "arguments": {"path": "a.py", "content": "x = 1"}},  # bare string kept
+    ]
+
+
+def test_minimax_xml_does_not_misread_prose_and_survives_dropped_wrapper():
+    # prose that merely mentions invoking a tool is not a call
+    assert pt.parse_tool_calls("I'll invoke the search function for you.") == []
+    # the <tool_call> JSON form still wins when both could appear; XML is only the fallback
+    both = '<tool_call>{"name":"read_file","arguments":{"path":"a"}}</tool_call>'
+    assert pt.parse_tool_calls(both) == [{"name": "read_file", "arguments": {"path": "a"}}]
+    # a bare <invoke> block whose wrapper was dropped still parses (some servers drop it)
+    bare = '<invoke name="list_directory"><parameter name="path">.</parameter></invoke>'
+    assert pt.parse_tool_calls(bare) == [{"name": "list_directory", "arguments": {"path": "."}}]

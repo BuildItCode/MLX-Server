@@ -35,6 +35,42 @@ def test_recover_loose_tool_calls_ignores_pure_prose():
     assert client.recover_loose_tool_calls("just call read_file with a path like /tmp", ["read_file"]) == []
 
 
+def test_recover_json_tool_calls_finds_drifted_object():
+    # the "the tool call became text" drift: a model that abandons its tagged format and emits a
+    # bare JSON object in a loose wrapper. Keyed on known tool names so it's safe.
+    names = ["list_directory", "read_file"]
+    text = 'Let me explore. [calling tool: {"name": "list_directory", "arguments": {"path": "src"}}]'
+    assert client.recover_json_tool_calls(text, names) == [
+        {"name": "list_directory", "arguments": {"path": "src"}}]
+    # an empty arguments object is still a valid call (e.g. list_directory with its default)
+    assert client.recover_json_tool_calls('{"name": "list_directory", "arguments": {}}', names) == [
+        {"name": "list_directory", "arguments": {}}]
+
+
+def test_recover_json_tool_calls_is_conservative():
+    names = ["list_directory"]
+    assert client.recover_json_tool_calls('{"name": "rm_rf", "arguments": {}}', names) == []   # unknown tool
+    assert client.recover_json_tool_calls('{"name": "list_directory"}', names) == []            # no arguments
+    assert client.recover_json_tool_calls('see the config {"path": "x"}', names) == []          # no name key
+    assert client.recover_json_tool_calls("no json here at all", names) == []
+    assert client.recover_json_tool_calls('{"name": "list_directory", "arguments": {}}', []) == []  # no tools
+
+
+def test_tool_call_echo_keeps_native_markup_but_cleans_harmony():
+    from mlx_launcher.screens.chat import ChatScreen
+
+    calls = [{"name": "read_file", "arguments": {"path": "a.py"}}]
+    # MiniMax's native XML is echoed verbatim so the model stays in its dialect (re-rendering it
+    # as Hermes is what made it drift)
+    xml = ('Let me look.\n<minimax:tool_call>\n<invoke name="read_file">'
+           '<parameter name="path">a.py</parameter></invoke>\n</minimax:tool_call>')
+    assert ChatScreen._tool_call_echo(xml, "", calls) == xml
+    # anything else is rebuilt as a clean prose + <tool_call> turn (nudges a drifted model back,
+    # and avoids gpt-oss Harmony's empty final channel / nested tokens)
+    echo = ChatScreen._tool_call_echo("", "thinking", calls)
+    assert "<tool_call>" in echo and "read_file" in echo
+
+
 def test_loads_lenient_handles_brace_inside_string_value():
     # a `}` inside a string value + trailing junk used to truncate the object → {}
     assert client._loads_lenient('{"content": "if (x) { y }"} trailing') == {"content": "if (x) { y }"}

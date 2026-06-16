@@ -38,9 +38,15 @@ SYSTEM_NOTE = (
     "You have file tools scoped to this project's working directory:\n  {root}\n"
     "Use list_directory, read_file, write_file, edit_file, delete_path, and run_command "
     "to work in it. All paths are RELATIVE to the working directory.\n"
+    "ACT on the request by CALLING these tools — when asked to create, build, fix, or change "
+    "something, actually do it with write_file / edit_file / run_command. Do NOT just describe "
+    "the steps, print the code for the user to copy, or ask whether you should proceed: make the "
+    "change. Keep going across as many tool calls as it takes, and only stop to ask a question if "
+    "you are genuinely blocked.\n"
     "When you build something viewable in a browser (an HTML page, a local web app), call "
     "open_in_browser with its path so the user can see it.\n"
-    "Inspect files before editing, make focused changes, and briefly explain what you did."
+    "Inspect files before editing, make focused changes, and when the task is complete give a "
+    "brief summary of what you changed."
 )
 
 

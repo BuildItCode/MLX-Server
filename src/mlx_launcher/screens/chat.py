@@ -34,24 +34,25 @@ from textual.widgets import (
     ListItem,
     ListView,
     Markdown,
+    OptionList,
     Select,
     Static,
     TextArea,
 )
+from textual.widgets.option_list import Option
 
 from ..chat import capabilities, fs_tools, knowledge, mcp_client, prompted_tools, skills, store, voice
 from ..chat import tools as chat_tools
 from ..chat.blocks import linkify_urls, split_blocks
 from ..chat.client import (
-    DEFAULT_MAX_TOKENS,
     ChatClient,
     build_openai_messages,
     parse_harmony,
-    parse_harmony_tool_calls,
     prepend_system,
-    recover_loose_tool_calls,
     recover_stripped_harmony,
+    scaled_max_tokens,
 )
+from ..chat.tool_calls import extract_tool_calls
 from ..chat.models import Attachment, Chat, ChatMessage, Project, Subagent
 from ..config.models import ServerConfig
 from ..server import discovery
@@ -99,9 +100,16 @@ def _context_bar_markup(used: int, window: int, width: int = 10) -> str:
 
 class PromptArea(TextArea):
     """Multiline prompt: Enter sends, Shift+Enter / Ctrl+J insert a newline.
-    Dropping files onto it (a paste of file paths) attaches them instead of typing."""
+    Dropping files onto it (a paste of file paths) attaches them instead of typing.
+    When the "/" command menu is open it captures arrow/Enter/Tab/Esc to drive it."""
 
     class Submitted(Message):
+        pass
+
+    class SlashSelected(Message):  # Enter while the "/" menu is open → run the highlighted command
+        pass
+
+    class SlashComplete(Message):  # Tab while the "/" menu is open → fill in the highlighted command
         pass
 
     class FilesDropped(Message):
@@ -109,7 +117,32 @@ class PromptArea(TextArea):
             self.paths = paths
             super().__init__()
 
+    def _slash_menu(self) -> Optional[OptionList]:
+        """The sibling slash-command list, if it's currently shown (else None)."""
+        try:
+            menu = self.screen.query_one("#slash-suggest", OptionList)
+        except Exception:  # noqa: BLE001 — not mounted / screen torn down
+            return None
+        return menu if menu.display else None
+
     async def _on_key(self, event: events.Key) -> None:
+        menu = self._slash_menu()
+        if menu is not None:  # the "/" command menu owns these keys while it's open
+            if event.key in ("down", "ctrl+n"):
+                menu.action_cursor_down()
+                event.stop(); event.prevent_default(); return
+            if event.key in ("up", "ctrl+p"):
+                menu.action_cursor_up()
+                event.stop(); event.prevent_default(); return
+            if event.key == "escape":
+                menu.display = False
+                event.stop(); event.prevent_default(); return
+            if event.key == "enter":
+                self.post_message(self.SlashSelected())
+                event.stop(); event.prevent_default(); return
+            if event.key == "tab":
+                self.post_message(self.SlashComplete())
+                event.stop(); event.prevent_default(); return
         if event.key == "enter":
             event.stop()
             event.prevent_default()
@@ -319,9 +352,27 @@ def _is_fatal_generation_error(exc: Exception) -> bool:
 _WRAP_UP_PROMPT = ("Now answer my question using the information gathered above. "
                    "Do NOT call any more tools — give your best final answer.")
 
+# A turn that finishes with finish_reason == "length" was cut off at the token limit, not done.
+# We push the partial answer + this nudge so the model resumes, instead of the loop misreading a
+# truncated turn as a finished one (the "reads a bit, then stops" symptom).
+_CONTINUE_TRUNCATED_PROMPT = ("Your previous message was cut off at the token limit. Continue "
+                              "exactly where you left off — do not repeat what you already wrote.")
+
 # Slash commands typed into the prompt. Matched on the WHOLE (trimmed, lower-cased) message so a
 # real message that merely starts with "/" (a path, "/plan the rollout") is sent normally.
-_SLASH_COMMANDS = {"/help", "/build", "/plan", "/auto", "/compact"}
+# The "/" command menu: (command, one-line description). _SLASH_COMMANDS (matched as a whole
+# message in _handle_slash_command) is derived from this, so the menu and the dispatcher never drift.
+_SLASH_COMMAND_INFO = (
+    ("/build", "make changes, ask before each file/command action"),
+    ("/plan", "propose a plan, take no actions"),
+    ("/auto", "make changes and run tools without asking"),
+    ("/compact", "summarize the chat to free up context"),
+    ("/help", "list the available commands"),
+)
+_SLASH_COMMANDS = {cmd for cmd, _ in _SLASH_COMMAND_INFO}
+# A bare "/command" prefix being typed (no space/argument yet) → show the menu. Once a space is
+# typed ("/plan the rollout"), this stops matching and the text is sent as a normal message.
+_SLASH_TRIGGER_RE = re.compile(r"^/\w*$")
 
 # Sent to the model to summarize the conversation when compacting context (manual /compact or the
 # automatic >95% trigger). The summary REPLACES the prior turns, so it must stand on its own.
@@ -454,6 +505,7 @@ class ChatScreen(Screen):
         self._cancel_flags = {"main": False, "side": False}  # Stop requested per pane
         self._auto_approve_fs = False  # "approve all" for file/command ops this session
         self._prompted_servers: set[str] = set()  # servers whose native tools failed → prompted mode
+        self._slash_items: list[tuple[str, str]] = []  # commands currently shown in the "/" menu
         # side chat: a second 50/50 pane holding a live conversation with a subagent
         self._active_pane = "main"  # which pane the single input sends to ("main" | "side")
         self._side_open = False
@@ -504,6 +556,7 @@ class ChatScreen(Screen):
                     yield Static("", id="context-bar", classes="ctx-bar")
                 yield Static("", id="attachments", classes="hidden")
                 yield Input(id="attach", placeholder="paste a file path, Enter to attach", classes="hidden")
+                yield OptionList(id="slash-suggest")  # the "/" command menu (sits just above the prompt)
                 with Horizontal(id="chat-inputrow"):
                     yield PromptArea(id="prompt", soft_wrap=True)
                     yield Button("+ Attach", id="attach-btn")
@@ -517,7 +570,10 @@ class ChatScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#prompt", PromptArea).border_title = "Enter to send · Shift+Enter newline · /help for commands"
+        self.query_one("#prompt", PromptArea).border_title = "Enter to send · Shift+Enter newline · type / for commands"
+        # the "/" command menu is mouse-clickable but never takes keyboard focus — the prompt keeps
+        # focus and routes arrow/Enter/Tab to it (see PromptArea._on_key).
+        self.query_one("#slash-suggest", OptionList).can_focus = False
         self._refresh_servers()
         self._refresh_skills()
         self._refresh_projects()
@@ -754,11 +810,12 @@ class ChatScreen(Screen):
         return next((s for s in self.app.config.servers if s.id == sid), None)
 
     def _client(self) -> ChatClient:
-        """A chat client whose token budget respects the profile's --max-tokens
-        (if the user set one) and otherwise falls back to a generous default —
-        never the server's truncating 512-token default."""
+        """A chat client whose token budget respects the profile's --max-tokens (if the user set
+        one) and otherwise scales with the context window (see scaled_max_tokens) — never the
+        server's truncating 512-token default."""
         cfg = self._server_by_id(self.chat.server_id) if (self.chat and self.chat.server_id) else None
-        max_tokens = (cfg.max_tokens if cfg and cfg.max_tokens else DEFAULT_MAX_TOKENS)
+        max_tokens = (cfg.max_tokens if cfg and cfg.max_tokens
+                      else scaled_max_tokens(self.chat.model, self._context_cap_of(cfg)))
         ctk = capabilities.reasoning_template_kwargs(self.chat.model, self.chat.reasoning_effort)
         return ChatClient(self.chat.base_url, self.chat.model, max_tokens=max_tokens,
                           chat_template_kwargs=ctk or None)
@@ -891,26 +948,29 @@ class ChatScreen(Screen):
             parts += ["   ", ("● AUTO", "bold #e06c75")]  # reddish: it acts without asking
         self.query_one("#chat-title", Static).update(Content.assemble(*parts))
 
+    @staticmethod
+    def _context_cap_of(cfg) -> Optional[int]:
+        """The context size the user explicitly configured on a profile — `--max-kv-size` for
+        mlx-vlm / vllm-mlx, `-c` for llama-cpp — or None when unset or the engine can't cap it.
+        mlx-lm can't cap context, so a (stale) setting there is ignored."""
+        engine = getattr(cfg, "engine", None) if cfg else None
+        if engine in ("mlx-vlm", "vllm-mlx"):
+            return cfg.max_kv_size or None
+        if engine == "llama-cpp":
+            return cfg.ctx or None
+        return None
+
     def _effective_context(self) -> Optional[int]:
-        """The context budget to meter against: the profile's configured cap
-        (`--max-kv-size`) when set — what the user actually told the server to
-        use — bounded by the model's true max; else the model's max alone. Only
-        mlx-vlm / vllm-mlx accept `--max-kv-size`; mlx-lm can't cap context, so we
-        ignore a (stale) setting there and meter against the model's window."""
+        """The context budget to meter against: the profile's configured cap (bounded by the
+        model's true max) when set, else the model's max alone."""
         if not self.chat:
             return None
         model_max = capabilities.context_window(self.chat.model)
         cfg = self._server_by_id(self.chat.server_id) if self.chat.server_id else None
-        engine = getattr(cfg, "engine", None) if cfg else None
-        if engine in ("mlx-vlm", "vllm-mlx"):
-            setting = cfg.max_kv_size  # the configured KV-cache (context) cap
-        elif engine == "llama-cpp":
-            setting = cfg.ctx          # llama-server's -c context size
-        else:
-            setting = None
-        if setting and model_max:
-            return min(setting, model_max)
-        return setting or model_max
+        cap = self._context_cap_of(cfg)
+        if cap and model_max:
+            return min(cap, model_max)
+        return cap or model_max
 
     def _context_usage(self) -> Optional[tuple[int, int]]:
         """(estimated tokens used, context window) for the current chat, or None when the
@@ -1002,12 +1062,35 @@ class ChatScreen(Screen):
         c._copy_text = text or ""
         return c
 
+    def _tool_call_widgets(self, calls: list[dict]) -> list:
+        """Compact dim lines naming the tool calls an assistant turn made — for reloaded
+        transcripts (live turns show richer per-call bubbles via _exec_tool)."""
+        out: list = []
+        for c in calls or []:
+            args = json.dumps(c.get("arguments") or {})
+            if len(args) > 80:
+                args = args[:80] + " …"
+            out.append(Static(Content.assemble(("▸ " + (c.get("name") or "tool"), "bold"), "  ", (args, "dim")),
+                              classes="msg-stats"))
+        return out
+
     def _message_widget(self, m: ChatMessage) -> Horizontal:
+        if m.role == "tool":  # a persisted tool result — same compact bubble as the live one
+            preview = m.text if len(m.text) <= 500 else m.text[:500] + " …"
+            row, _ = self._bubble("▸ tool", "msg-tool",
+                                  Content.assemble((m.tool_name or "tool", "bold"), "\n", (preview, "dim")))
+            return row
         if m.role == "assistant":
-            widgets = self._assistant_body_widgets(m.text)
+            has_text = bool((m.text or "").strip())
+            widgets = self._assistant_body_widgets(m.text) if has_text else []
+            if m.tool_calls:  # an agentic tool-call turn — list what it called
+                widgets += self._tool_call_widgets(m.tool_calls)
+            if not widgets:
+                widgets = [Static("[dim](no content)[/]", classes="msg-body")]
             if m.tps:
                 widgets.append(Static(self._stats_text(m.tps, m.n_tokens or 0, m.elapsed or 0.0), classes="msg-stats"))
-            widgets.append(self._copy_control(m.text))
+            if has_text:
+                widgets.append(self._copy_control(m.text))
             return self._assemble_row(self._server_label_for(self.chat), "msg-assistant", widgets)
         chips = "  ".join(f"{a.name or a.path} ({a.kind})" for a in m.attachments) if m.attachments else ""
         if m.text and chips:
@@ -1496,6 +1579,62 @@ class ChatScreen(Screen):
     def _prompt_submitted(self) -> None:
         self.action_send()
 
+    # --- "/" command menu ------------------------------------------------
+
+    @on(TextArea.Changed, "#prompt")
+    def _prompt_changed(self) -> None:
+        self._update_slash_menu()
+
+    def _update_slash_menu(self) -> None:
+        """Show/filter the slash-command menu as the user types a bare '/command' prefix. Only for
+        the main chat — slash commands don't apply to a subagent side chat."""
+        sug = self.query_one("#slash-suggest", OptionList)
+        text = self.query_one("#prompt", PromptArea).text
+        sending_to_side = self._active_pane == "side" and self._side_open
+        if sending_to_side or not _SLASH_TRIGGER_RE.match(text):
+            self._slash_items = []
+            sug.display = False
+            return
+        prefix = text.lower()
+        self._slash_items = [(c, d) for c, d in _SLASH_COMMAND_INFO if c.startswith(prefix)]
+        sug.clear_options()
+        if not self._slash_items:
+            sug.display = False
+            return
+        sug.add_options([self._slash_option(c, d) for c, d in self._slash_items])
+        sug.highlighted = 0
+        sug.display = True
+
+    @staticmethod
+    def _slash_option(cmd: str, desc: str) -> Option:
+        return Option(Content.assemble((cmd, "bold"), (f"   {desc}", "dim")))
+
+    @on(PromptArea.SlashSelected)
+    def _slash_enter(self) -> None:  # Enter while the menu is open → run the highlighted command
+        sug = self.query_one("#slash-suggest", OptionList)
+        if sug.highlighted is not None and 0 <= sug.highlighted < len(self._slash_items):
+            self._run_slash(self._slash_items[sug.highlighted][0])
+
+    @on(OptionList.OptionSelected, "#slash-suggest")
+    def _slash_clicked(self, event: OptionList.OptionSelected) -> None:  # click a row
+        if 0 <= event.option_index < len(self._slash_items):
+            self._run_slash(self._slash_items[event.option_index][0])
+        event.stop()
+
+    def _run_slash(self, cmd: str) -> None:
+        self.query_one("#slash-suggest", OptionList).display = False
+        self._handle_slash_command(cmd)  # clears the prompt + executes (mode change / compact / help)
+        self.query_one("#prompt", PromptArea).focus()
+
+    @on(PromptArea.SlashComplete)
+    def _slash_complete(self) -> None:  # Tab fills in the highlighted command without running it
+        sug = self.query_one("#slash-suggest", OptionList)
+        if sug.highlighted is None or not (0 <= sug.highlighted < len(self._slash_items)):
+            return
+        prompt = self.query_one("#prompt", PromptArea)
+        prompt.load_text(self._slash_items[sug.highlighted][0])
+        prompt.move_cursor(prompt.document.end)  # caret to end so the next keystroke appends
+
     def _refresh_attachments(self) -> None:
         bar = self.query_one("#attachments", Static)
         if self._pending:
@@ -1673,7 +1812,14 @@ class ChatScreen(Screen):
         if self.chat.messages[-1].role != "assistant":
             self.notify("Nothing to regenerate", severity="warning")
             return
-        self.chat.messages.pop()
+        # Drop the last answer AND any tool steps that produced it, back to the last user turn,
+        # so regenerating redoes the whole turn (tool calls included), not just the final wording.
+        last_user = next((i for i in range(len(self.chat.messages) - 1, -1, -1)
+                          if self.chat.messages[i].role == "user"), None)
+        if last_user is None:
+            self.chat.messages.pop()
+        else:
+            del self.chat.messages[last_user + 1:]
         self._persist()
         self._render_transcript()
         self._generate()
@@ -1716,6 +1862,9 @@ class ChatScreen(Screen):
         assert self.chat is not None
         lines = [f"# {self.chat.title}", "", f"*model: {self.chat.model or 'unknown'}*", ""]
         for m in self.chat.messages:
+            if m.role == "tool":  # an agentic tool result — show it as a fenced block, not as prose
+                lines += [f"## tool · {m.tool_name or 'tool'}", "", "```", m.text, "```", ""]
+                continue
             who = "You" if m.role == "user" else (self.chat.model or "assistant")
             lines.append(f"## {who}")
             lines.append("")
@@ -1726,7 +1875,10 @@ class ChatScreen(Screen):
                 for ln in m.reasoning.splitlines():
                     lines.append(f"> {ln}")
                 lines.append("")
-            lines.append(m.text)
+            for c in (m.tool_calls or []):  # tool-call turns: name the calls it made
+                lines.append(f"- ▸ called `{c.get('name', '?')}`")
+            if m.text:
+                lines.append(m.text)
             lines.append("")
         return "\n".join(lines)
 
@@ -1951,7 +2103,8 @@ class ChatScreen(Screen):
             return
         transcript = self.query_one("#side-transcript", VerticalScroll)
         client = ChatClient(cfg.base_url(), cfg.model,
-                            max_tokens=(sub.max_tokens or cfg.max_tokens or DEFAULT_MAX_TOKENS))
+                            max_tokens=(sub.max_tokens or cfg.max_tokens
+                                        or scaled_max_tokens(cfg.model, self._context_cap_of(cfg))))
         cancel = self._cancel_cb("side")
         self._set_generating("side", True)
         try:
@@ -2064,34 +2217,20 @@ class ChatScreen(Screen):
                     raise
                 if data is None:
                     return None
-                msg = (data.get("choices") or [{}])[0].get("message") or {}
-                raw = msg.get("content") or ""
-                tool_calls = msg.get("tool_calls") or []
-                content, reason = parse_harmony(raw)
-                harmony_calls = parse_harmony_tool_calls(raw) if not tool_calls else []
-                # text protocol (<tool_call>) or, last-resort, a stripped `name {json}`
-                text_calls = ((prompted_tools.parse_tool_calls(content)
-                               or recover_loose_tool_calls(content, tool_names))
-                              if (specs and not tool_calls and not harmony_calls) else [])
-                if not tool_calls and not harmony_calls and not text_calls:
-                    return prompted_tools.strip_tool_calls(content) or content
-                if tool_calls:  # native — echo as a tool-call turn, results as `tool` role
-                    messages.append({"role": "assistant", "content": content or None, "tool_calls": tool_calls})
-                    for call in tool_calls:
-                        fn = call.get("function") or {}
-                        try:
-                            args = json.loads(fn.get("arguments") or "{}")
-                        except json.JSONDecodeError:
-                            args = {}
-                        n_calls += 1
-                        result = await self._exec_subagent_tool(fn.get("name", ""), args, sessions, router)
-                        messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": result[:8000]})
-                else:  # harmony or text protocol — echo clean prose, results as user turns
-                    calls = harmony_calls or text_calls
-                    clean = prompted_tools.strip_tool_calls(content) or reason or "Calling tools."
-                    messages.append({"role": "assistant", "content": clean})
-                    for call in calls:
-                        n_calls += 1
+                # same format-agnostic extraction as the main loop (native / Harmony / MiniMax / …)
+                ext = extract_tool_calls((data.get("choices") or [{}])[0].get("message") or {}, None, tool_names)
+                if not ext.calls:
+                    return prompted_tools.strip_tool_calls(ext.content) or ext.content
+                n_calls += len(ext.calls)
+                if ext.is_native:  # echo as a tool-call turn, results as the `tool` role
+                    messages.append({"role": "assistant", "content": ext.content or None, "tool_calls": ext.native})
+                    for raw_call, call in zip(ext.native, ext.calls):
+                        result = await self._exec_subagent_tool(call["name"], call["arguments"], sessions, router)
+                        messages.append({"role": "tool", "tool_call_id": raw_call.get("id", ""), "content": result[:8000]})
+                else:  # text protocol — echo the model's own markup, results as user turns
+                    messages.append({"role": "assistant",
+                                     "content": self._tool_call_echo(ext.content, ext.reason, ext.calls)})
+                    for call in ext.calls:
                         result = await self._exec_subagent_tool(call["name"], call["arguments"], sessions, router)
                         messages.append({"role": "user", "content": prompted_tools.tool_response(call["name"], result[:8000])})
             # ran out of iterations still calling tools → one no-tools turn for an answer
@@ -2228,9 +2367,73 @@ class ChatScreen(Screen):
             elapsed=round(elapsed, 1) if elapsed > 0 else None,
         )
 
+    def _continue_if_truncated(self, messages: list, clean: str, finish: Optional[str]) -> bool:
+        """If the model's turn was cut off at the token limit (finish_reason == 'length') with
+        partial answer text and no tool call, push the partial + a 'continue' nudge so it resumes,
+        instead of the loop misreading a truncated turn as finished. Returns True when it did so."""
+        if finish != "length" or not (clean or "").strip():
+            return False
+        messages.append({"role": "assistant", "content": clean})
+        messages.append({"role": "user", "content": _CONTINUE_TRUNCATED_PROMPT})
+        return True
+
+    @staticmethod
+    def _tool_call_echo(content: str, reason: str, calls: list[dict]) -> str:
+        """The assistant turn to put back in the in-flight history for a recovered tool call.
+
+        MiniMax emits its own ``<minimax:tool_call>`` XML; if we strip it and re-render the turn as
+        Hermes ``<tool_call>`` JSON, MiniMax sees its own actions in a foreign dialect and drifts
+        into a half-remembered format on later calls. So we echo MiniMax's native XML VERBATIM to
+        keep it in that dialect. Everything else is rebuilt as a clean prose + ``<tool_call>`` turn:
+        that nudges a drifted/loose form back toward the instructed protocol and avoids gpt-oss
+        Harmony's raw ``<|...|>`` control tokens (which nest channels and confuse the template)."""
+        c = content or ""
+        if "<minimax:tool_call>" in c or "<invoke name=" in c:
+            return content  # MiniMax's native XML — keep it as-is
+        prose = (prompted_tools.strip_tool_calls(content) or reason or "").strip()
+        tags = "\n".join("<tool_call>" + json.dumps(call) + "</tool_call>" for call in calls)
+        return f"{prose}\n{tags}".strip() if prose else tags
+
+    def _persist_tool_turn(self, prose: str, calls: list[dict]) -> None:
+        """Record an agentic tool-call turn in the chat history so a follow-up ('continue') keeps
+        the context. `calls` are normalized [{name, arguments}] dicts."""
+        if self.chat is not None:
+            self.chat.messages.append(ChatMessage(
+                role="assistant", text=(prose or "").strip(),
+                tool_calls=[{"name": c["name"], "arguments": c["arguments"]} for c in calls]))
+
+    def _persist_tool_result(self, name: str, result: str) -> None:
+        """Record a tool result in the chat history (mirrors what's fed back to the model)."""
+        if self.chat is not None:
+            self.chat.messages.append(ChatMessage(role="tool", tool_name=name, text=result[:8000]))
+
+    async def _run_tool_calls(self, ext, messages: list, sessions: dict, router: dict,
+                              transcript, fs_root: Optional[str]) -> int:
+        """Echo the model's tool-call turn, execute each call, feed the results back, and persist —
+        for both protocols. Structured `tool_calls` → echo native + results as the `tool` role;
+        text-recovered calls → echo the model's own markup (MiniMax XML kept verbatim) + results as
+        user <tool_response>. Mutates `messages`; returns the number of calls executed."""
+        if ext.is_native:
+            messages.append({"role": "assistant", "content": ext.content or None, "tool_calls": ext.native})
+            self._persist_tool_turn(ext.content, ext.calls)
+            for raw_call, call in zip(ext.native, ext.calls):
+                result = await self._exec_tool(call["name"], call["arguments"], sessions, router, transcript, fs_root)
+                messages.append({"role": "tool", "tool_call_id": raw_call.get("id", ""), "content": result[:8000]})
+                self._persist_tool_result(call["name"], result)
+        else:
+            messages.append({"role": "assistant", "content": self._tool_call_echo(ext.content, ext.reason, ext.calls)})
+            self._persist_tool_turn(prompted_tools.strip_tool_calls(ext.content) or ext.reason, ext.calls)
+            for call in ext.calls:
+                result = await self._exec_tool(call["name"], call["arguments"], sessions, router, transcript, fs_root)
+                messages.append({"role": "user", "content": prompted_tools.tool_response(call["name"], result[:8000])})
+                self._persist_tool_result(call["name"], result)
+        return len(ext.calls)
+
     async def _generate_tools(self) -> None:
         """Function-calling loop: offer web_search + connected MCP tools, execute the
-        model's tool calls, then render the final answer."""
+        model's tool calls, then render the final answer. The whole tool exchange is persisted
+        into the chat history (as assistant tool-call turns + `tool` results) so a follow-up turn
+        keeps the work context instead of starting over."""
         assert self.chat is not None
         transcript = self.query_one("#transcript", VerticalScroll)
         client = self._client()
@@ -2244,6 +2447,7 @@ class ChatScreen(Screen):
         t0 = time.monotonic()
         n_calls = 0
         final_text = ""
+        truncating = False  # the last turn hit the token limit → accumulate, don't treat as final
         thinking = None  # the live "thinking…" bubble between turns (cleaned up below)
         max_iters = 24 if fs_root else 8
         # cap web/MCP search loops so a model that keeps searching (some batch several
@@ -2274,6 +2478,9 @@ class ChatScreen(Screen):
                 # decides whether we keep SENDING the native param (dropped if it 500s).
                 if specs:
                     prepend_system(messages, prompted_tools.tool_instructions(specs))
+                # `prompted` only decides whether we keep SENDING the native tools param; the tools
+                # are described in the prompt either way, and extract_tool_calls accepts native /
+                # Harmony / MiniMax / <tool_call> / loose calls alike — so the loop is format-agnostic.
                 prompted = (self.chat.server_id or "") in self._prompted_servers
                 for _ in range(max_iters):
                     if cancel():
@@ -2283,32 +2490,8 @@ class ChatScreen(Screen):
                                     severity="warning")
                         break  # → wrap-up below forces a final answer
                     thinking = await self._mount_thinking(transcript)
-                    if prompted:
-                        data = await self._bridge_chat(client, messages, None, cancel=cancel)
-                        await thinking.remove()
-                        thinking = None
-                        if data is None:  # stopped
-                            break
-                        msg = (data.get("choices") or [{}])[0].get("message") or {}
-                        raw = msg.get("content") or ""
-                        content, _r = parse_harmony(raw)
-                        # accept any signaling: <tool_call> text, harmony, or stripped name {json}
-                        calls = (prompted_tools.parse_tool_calls(content)
-                                 or parse_harmony_tool_calls(raw)
-                                 or recover_loose_tool_calls(content, tool_names)) if specs else []
-                        if not calls:
-                            final_text = prompted_tools.strip_tool_calls(content) or content
-                            messages.append({"role": "assistant", "content": content})
-                            break
-                        messages.append({"role": "assistant", "content": content})
-                        for call in calls:
-                            n_calls += 1
-                            result = await self._exec_tool(call["name"], call["arguments"], sessions, router, transcript, fs_root)
-                            messages.append({"role": "user", "content": prompted_tools.tool_response(call["name"], result[:8000])})
-                        self._scroll_end()
-                        continue
                     try:
-                        data = await self._bridge_chat(client, messages, specs, cancel=cancel)
+                        data = await self._bridge_chat(client, messages, None if prompted else specs, cancel=cancel)
                     except Exception as exc:  # native tools rejected → switch this server to prompted
                         await thinking.remove()
                         thinking = None
@@ -2326,45 +2509,20 @@ class ChatScreen(Screen):
                     if data is None:  # stopped
                         break
                     choice = (data.get("choices") or [{}])[0]
-                    msg = choice.get("message") or {}
-                    raw = msg.get("content") or ""
-                    tool_calls = msg.get("tool_calls") or []
-                    content, reason = parse_harmony(raw)
-                    # gpt-oss puts calls in the Harmony commentary channel; mlx_lm
-                    # returns them as text, not native tool_calls — recover them. As a
-                    # last resort (stripped delimiters) recover a bare `name {json}`.
-                    harmony_calls = parse_harmony_tool_calls(raw) if not tool_calls else []
-                    # a model following the prompt instructions emits <tool_call> text even
-                    # while we're sending native; catch that, then a stripped `name {json}`.
-                    other_calls = ((prompted_tools.parse_tool_calls(content)
-                                    or recover_loose_tool_calls(content, tool_names))
-                                   if (specs and not tool_calls and not harmony_calls) else [])
-                    if not tool_calls and not harmony_calls and not other_calls:
-                        messages.append({"role": "assistant", "content": content})
-                        final_text = content
+                    ext = extract_tool_calls(choice.get("message") or {}, choice.get("finish_reason"), tool_names)
+                    if not ext.calls:  # a final answer — or a truncated turn we should continue
+                        clean = prompted_tools.strip_tool_calls(ext.content) or ext.content
+                        if self._continue_if_truncated(messages, clean, ext.finish):
+                            final_text += clean
+                            truncating = True
+                            continue
+                        final_text = (final_text + clean) if truncating else clean
+                        truncating = False
+                        messages.append({"role": "assistant", "content": ext.content})
                         break
-                    text_calls = harmony_calls or other_calls
-                    if text_calls:
-                        # Echo a CLEAN assistant turn (raw Harmony tokens would nest
-                        # channels and confuse the template), then feed each result
-                        # back as a user message — the round-trip gpt-oss renders.
-                        messages.append({"role": "assistant", "content": reason or content or "Calling tools."})
-                        for call in text_calls:
-                            n_calls += 1
-                            result = await self._exec_tool(call["name"], call["arguments"], sessions, router, transcript, fs_root)
-                            messages.append({"role": "user", "content": prompted_tools.tool_response(call["name"], result[:8000])})
-                        self._scroll_end()
-                        continue
-                    messages.append({"role": "assistant", "content": content or None, "tool_calls": tool_calls})
-                    for call in tool_calls:
-                        n_calls += 1
-                        fn = call.get("function") or {}
-                        try:
-                            args = json.loads(fn.get("arguments") or "{}")
-                        except json.JSONDecodeError:
-                            args = {}
-                        result = await self._exec_tool(fn.get("name", ""), args, sessions, router, transcript, fs_root)
-                        messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": result[:8000]})
+                    truncating = False
+                    final_text = ""  # the real answer comes after the tool work
+                    n_calls += await self._run_tool_calls(ext, messages, sessions, router, transcript, fs_root)
                     self._scroll_end()
             # ran out of iterations still calling tools but never answered → one more
             # turn with NO tools so the user gets an answer, not "(no answer)".

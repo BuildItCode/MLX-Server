@@ -98,6 +98,8 @@ class MlxLauncherApp(App):
     #chat-inputrow { height: auto; padding: 0 1 1 1; }
     #prompt { width: 1fr; height: 6; border: round $panel; border-title-color: $accent; }
     #chat-inputrow Button { margin: 0 0 0 1; }
+    /* the "/" command menu, shown just above the prompt while typing a slash command */
+    #slash-suggest { display: none; height: auto; max-height: 8; margin: 0 1; border: round $accent; background: $surface; }
     /* mic while recording → flat red text (label also flips to "Stop") */
     #mic-btn.-recording { color: $error; text-style: bold; }
     #chat-chips { height: auto; padding: 1 1; align-vertical: middle; }
