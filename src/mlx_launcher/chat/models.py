@@ -6,7 +6,7 @@ import time
 import uuid
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def _new_id() -> str:
@@ -53,12 +53,22 @@ class Chat(BaseModel):
     reasoning_effort: Optional[str] = None  # off|low|medium|high; None = model/template default
     web_search: bool = False  # allow the model to call the web_search tool
     tools: bool = False  # allow the model to call MCP server tools
-    plan_mode: bool = False  # plan-only: produce a plan for approval, take no actions
+    # build = make changes, ask before each file/command action; plan = propose a plan, take no
+    # actions; auto = make changes and run tools WITHOUT asking (always auto-approve).
+    mode: Literal["build", "plan", "auto"] = "build"
     coding: bool = False  # senior-engineer persona + validate-your-work system prompt
     subagent_ids: list[str] = Field(default_factory=list)  # legacy; kept for back-compat (unused)
     messages: list[ChatMessage] = Field(default_factory=list)
     created: float = Field(default_factory=_now)
     updated: float = Field(default_factory=_now)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_plan_mode(cls, data):
+        # back-compat: chats saved before the 3-way mode used a `plan_mode` bool
+        if isinstance(data, dict) and "mode" not in data and data.get("plan_mode"):
+            data = {**data, "mode": "plan"}
+        return data
 
 
 class Project(BaseModel):

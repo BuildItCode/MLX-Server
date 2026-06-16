@@ -288,6 +288,25 @@ def _split_text(text: str, max_len: int = 480) -> list[str]:
     return chunks
 
 
+def _fade_ends(samples, sample_rate: int, ms: float = 8.0):
+    """Apply a short linear fade-in/out so a chunk starts and ends at zero amplitude.
+
+    Kokoro renders each sentence-chunk independently, so a chunk's first/last sample is almost
+    never zero. Concatenated (or butted against the inter-sentence silence, or at the very start/
+    end of playback) that non-zero edge is a step discontinuity the DAC reproduces as a click/pop
+    — the remaining "artifacts". An ~8 ms ramp is inaudible on a speech onset but removes them."""
+    import numpy as np
+
+    n = int(sample_rate * ms / 1000.0)
+    if n <= 0 or samples.size < 2 * n:
+        return samples
+    ramp = np.linspace(0.0, 1.0, n, dtype=np.float32)
+    samples = samples.copy()  # never mutate the array Kokoro handed back
+    samples[:n] *= ramp
+    samples[-n:] *= ramp[::-1]
+    return samples
+
+
 _kokoro = None  # cache: loading the ONNX model is expensive
 
 
@@ -384,14 +403,16 @@ class Speaker:
         kokoro = _kokoro_instance()
         # Synthesize every sentence-chunk first, then play ONE contiguous buffer. A separate
         # sd.play() per chunk opens/closes a fresh stream each time → clicks + gaps at every
-        # boundary (the "artifacts"); a single stream over joined audio is gapless.
+        # boundary; a single stream over joined audio is gapless. Each chunk is also faded at
+        # both ends (_fade_ends) so its edges hit zero — otherwise the join (and the start/end
+        # of playback) steps off a non-zero sample, which the DAC clicks on.
         parts: list = []
         sample_rate = 24000
         for chunk in _split_text(text):
             if self._stop.is_set():
                 return
             samples, sample_rate = kokoro.create(chunk, voice=self.voice, speed=1.0, lang="en-us")
-            parts.append(np.ascontiguousarray(samples, dtype=np.float32))
+            parts.append(_fade_ends(np.ascontiguousarray(samples, dtype=np.float32), sample_rate))
         if not parts or self._stop.is_set():
             return
         if len(parts) == 1:

@@ -84,7 +84,7 @@ def test_build_messages_injects_skill_and_project():
 def test_plan_mode_injects_instructions():
     from mlx_launcher.chat.client import PLAN_MODE_INSTRUCTIONS
 
-    chat = Chat(plan_mode=True, messages=[ChatMessage(role="user", text="add a feature")])
+    chat = Chat(mode="plan", messages=[ChatMessage(role="user", text="add a feature")])
     msgs = build_openai_messages(chat)
     assert msgs[0]["role"] == "system"
     assert "PLAN MODE" in msgs[0]["content"]

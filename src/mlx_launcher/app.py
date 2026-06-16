@@ -201,6 +201,8 @@ class MlxLauncherApp(App):
     .hf-row Button { width: 14; min-width: 10; height: 1; margin: 0 0 0 1; border: none; }
     .hf-row .hf-pick { background: $success; color: $background; text-style: bold; }
     .hf-row .hf-choose { background: $panel; color: $accent; }
+    #hf-progress { width: 1fr; height: 1; margin: 1 0 0 0; }
+    #hf-progress Bar { width: 1fr; }
     #hf-log { height: 12; border: round $panel; margin: 1 0 0 0; }
     #hf-buttons { height: auto; padding: 1 0; }
     #hf-buttons Button { margin: 0 1 0 0; }
@@ -208,6 +210,8 @@ class MlxLauncherApp(App):
     #model-row { height: auto; }
     #model-row #model { width: 1fr; }
     #model-row #hf-search { width: auto; min-width: 12; margin: 0 0 0 1; }
+    /* editor: dropdown of already-downloaded HF models under the model field */
+    #model-suggest { display: none; height: auto; max-height: 10; margin: 0; border: round $panel; background: $surface; }
     TextPromptModal, ConfirmModal, PermissionModal, ConnectorsModal, SubagentsModal { align: center middle; background: $background 60%; }
     #modal-box { width: 64; height: auto; padding: 1 2; border: round $primary; background: $surface; }
     #modal-buttons { height: auto; padding: 1 0 0 0; }

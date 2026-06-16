@@ -28,9 +28,11 @@ from textual.widgets import (
     Header,
     Input,
     Label,
+    OptionList,
     Select,
     Switch,
 )
+from textual.widgets.option_list import Option
 
 from .. import hf
 from ..config import flags, store
@@ -82,6 +84,11 @@ class EditorScreen(Screen):
     def __init__(self, server: Optional[ServerConfig] = None) -> None:
         super().__init__()
         self.server = server
+        # model-field autocomplete of already-downloaded HF models (lazy: scanned on first focus)
+        self._cached: Optional[list[hf.LocalModel]] = None
+        self._loading_cached = False
+        self._suggest_items: list[hf.LocalModel] = []
+        self._suppress_suggest = False  # set while we fill the field ourselves, so it doesn't reopen
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -106,6 +113,8 @@ class EditorScreen(Screen):
             with Horizontal(id="model-row"):
                 yield PathInput(id="model", placeholder="/path/to/model  or  mlx-community/Qwen2.5-7B-4bit")
                 yield Button("Search HF", id="hf-search")
+            # dropdown of already-downloaded HF models — appears when the field is focused
+            yield OptionList(id="model-suggest")
             yield Label("", id="model-hint", classes="hint")
             with Horizontal(classes="row"):
                 with Vertical(classes="col"):
@@ -277,6 +286,9 @@ class EditorScreen(Screen):
         self._refresh_engine_hint()
         self._apply_engine_gating()
         self._update_preview()
+        # the suggestion list is mouse-clickable but never takes keyboard focus — the model
+        # field keeps focus and drives it (arrows/enter), so there's no focus-juggling.
+        self.query_one("#model-suggest", OptionList).can_focus = False
         self.query_one("#name", Input).focus()
 
     def _refresh_engine_hint(self) -> None:
@@ -481,6 +493,7 @@ class EditorScreen(Screen):
             self._set_model_path(resolved)
 
     def _set_model_path(self, path: str) -> None:
+        self._suppress_suggest = True  # we're filling the field — don't pop the dropdown back open
         self.query_one("#model", PathInput).value = path
         self.query_one("#model-hint", Label).update(path_hint(path))
         self._update_preview()
@@ -494,6 +507,11 @@ class EditorScreen(Screen):
                 event.input.value = cleaned
                 return  # re-fires with the cleaned value
             self.query_one("#model-hint", Label).update(path_hint(cleaned))
+            if self._suppress_suggest:
+                self._suppress_suggest = False  # consume: this change was our own fill
+                self._hide_suggest()
+            elif self.query_one("#model", PathInput).has_focus:
+                self._show_suggest()  # the user is typing → filter the downloaded-model list
         self._update_preview()
 
     @on(Select.Changed)
@@ -536,6 +554,9 @@ class EditorScreen(Screen):
         self.app.pop_screen()
 
     def action_cancel(self) -> None:
+        if self.query_one("#model-suggest", OptionList).display:
+            self._hide_suggest()  # Escape closes the dropdown before it closes the editor
+            return
         self.app.pop_screen()
 
     def action_save(self) -> None:
@@ -573,3 +594,94 @@ class EditorScreen(Screen):
         self._set_model_path(result.repo_id)
         self._apply_engine_gating()  # idempotent — correct even when the engine didn't change
         self._update_preview()
+
+    # --- downloaded-model autocomplete (model field) ---------------------
+
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        if getattr(event.widget, "id", None) == "model":
+            self._show_suggest()  # focusing the model field opens the downloaded-models dropdown
+
+    def on_descendant_blur(self, event: events.DescendantBlur) -> None:
+        if getattr(event.widget, "id", None) == "model":
+            self._hide_suggest()  # leaving the field closes it (the list never holds focus itself)
+
+    def on_key(self, event: events.Key) -> None:
+        # the field keeps focus, so route arrow keys to the (unfocusable) dropdown ourselves
+        sug = self.query_one("#model-suggest", OptionList)
+        if not sug.display or not self.query_one("#model", PathInput).has_focus:
+            return
+        if event.key == "down":
+            sug.action_cursor_down()
+            event.stop()
+        elif event.key == "up":
+            sug.action_cursor_up()
+            event.stop()
+
+    @on(Input.Submitted, "#model")
+    def _model_submitted(self, event: Input.Submitted) -> None:
+        # Enter while the dropdown is open picks the highlighted model instead of submitting
+        sug = self.query_one("#model-suggest", OptionList)
+        if sug.display and sug.highlighted is not None and 0 <= sug.highlighted < len(self._suggest_items):
+            self._apply_hf_result(self._suggest_items[sug.highlighted])
+            self._hide_suggest()
+            event.stop()
+
+    @on(OptionList.OptionSelected, "#model-suggest")
+    def _suggest_selected(self, event: OptionList.OptionSelected) -> None:
+        if 0 <= event.option_index < len(self._suggest_items):
+            self._apply_hf_result(self._suggest_items[event.option_index])  # fills field + sets engine
+        self._hide_suggest()
+        event.stop()
+
+    def _looks_like_path(self, text: str) -> bool:
+        """A filesystem path (not a repo id) — don't offer HF suggestions while one is typed."""
+        t = text.strip()
+        return t.startswith(("/", "~", ".")) or (len(t) >= 2 and t[1] == ":")  # POSIX/home or Windows drive
+
+    def _show_suggest(self) -> None:
+        sug = self.query_one("#model-suggest", OptionList)
+        typed = self.query_one("#model", PathInput).value.strip()
+        if self._looks_like_path(typed):
+            sug.display = False
+            return
+        if self._cached is None:  # first use → scan the cache off-thread, then re-open if still focused
+            self._ensure_cached_loading()
+            sug.display = False
+            return
+        low = typed.lower()
+        items = [m for m in self._cached if low in m.repo_id.lower()] if low else list(self._cached)
+        self._suggest_items = items[:50]
+        sug.clear_options()
+        if not self._suggest_items:
+            sug.display = False
+            return
+        sug.add_options([self._suggest_option(m) for m in self._suggest_items])
+        sug.highlighted = 0
+        sug.display = True
+
+    def _hide_suggest(self) -> None:
+        self.query_one("#model-suggest", OptionList).display = False
+
+    def _suggest_option(self, m: hf.LocalModel) -> Option:
+        return Option(Content.assemble(
+            (m.repo_id, ""),
+            (f"   {hf.human(m.size_bytes)} · {m.fmt.upper()}", "dim"),
+        ))
+
+    def _ensure_cached_loading(self) -> None:
+        if self._loading_cached:
+            return
+        self._loading_cached = True
+        self.run_worker(self._load_cached_models())
+
+    async def _load_cached_models(self) -> None:
+        import asyncio
+
+        try:
+            self._cached = await asyncio.to_thread(hf.cached_models)
+        except Exception:  # noqa: BLE001 — never let a cache-scan failure break the editor
+            self._cached = []
+        finally:
+            self._loading_cached = False
+        if self.query_one("#model", PathInput).has_focus:
+            self._show_suggest()  # the user is still on the field → open it now that we have the list

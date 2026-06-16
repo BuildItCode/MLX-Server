@@ -171,6 +171,8 @@ def _perm_prompt(name: str, args: dict) -> tuple[str, str]:
         return f"Delete  {args.get('path', '?')}", ""
     if name == "run_command":
         return "Run command", args.get("command", "")[:500]
+    if name == "open_in_browser":
+        return f"Open in browser  {args.get('path') or args.get('url', '?')}", ""
     return name, json.dumps(args)[:500]
 
 
@@ -317,6 +319,24 @@ def _is_fatal_generation_error(exc: Exception) -> bool:
 _WRAP_UP_PROMPT = ("Now answer my question using the information gathered above. "
                    "Do NOT call any more tools — give your best final answer.")
 
+# Slash commands typed into the prompt. Matched on the WHOLE (trimmed, lower-cased) message so a
+# real message that merely starts with "/" (a path, "/plan the rollout") is sent normally.
+_SLASH_COMMANDS = {"/help", "/build", "/plan", "/auto", "/compact"}
+
+# Sent to the model to summarize the conversation when compacting context (manual /compact or the
+# automatic >95% trigger). The summary REPLACES the prior turns, so it must stand on its own.
+_COMPACT_INSTRUCTIONS = (
+    "Summarize our conversation so far into a compact but complete brief, so we can keep going after "
+    "the earlier turns are cleared from context. Preserve everything that matters: my goals and "
+    "constraints, decisions made and why, key facts and code, file paths, and any unfinished tasks or "
+    "next steps. Use tight bullet points under short headings. Do not ask questions, add pleasantries, "
+    "or invent anything not in the conversation. Output ONLY the summary."
+)
+
+# The visible user turn that stands in for the cleared history (a valid user→assistant pair keeps
+# templates that require alternating roles happy).
+_COMPACT_USER_MARKER = "⟢ Earlier conversation compacted to free up context."
+
 
 class SubagentsModal(ModalScreen[Optional[str]]):
     """The subagents dropdown: pick a specialist to open as a side chat, or manage
@@ -442,6 +462,7 @@ class ChatScreen(Screen):
         self._side_messages: list[ChatMessage] = []
         self._recorder = None  # voice.Recorder while the mic is capturing, else None
         self._speaker = None   # voice.Speaker while reading a reply aloud, else None
+        self._compacting = False  # a context-compaction summary is in flight (guards re-entry)
 
     # --- layout ----------------------------------------------------------
 
@@ -471,7 +492,7 @@ class ChatScreen(Screen):
                             yield Button("✕ Close", id="side-close", variant="error")
                         yield VerticalScroll(id="side-transcript")
                 with Horizontal(id="chat-chips"):  # chips + the context counter, pushed right
-                    yield ToggleChip("plan", "plan", id="chip-plan")
+                    yield Static("mode: build", id="chip-mode", classes="chip chip-action")
                     yield ToggleChip("reason", "reasoning", id="chip-reasoning")
                     yield Static("effort: auto", id="chip-effort", classes="chip")
                     yield ToggleChip("web", "web", id="chip-web")
@@ -496,7 +517,7 @@ class ChatScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#prompt", PromptArea).border_title = "Enter to send · Shift+Enter for newline"
+        self.query_one("#prompt", PromptArea).border_title = "Enter to send · Shift+Enter newline · /help for commands"
         self._refresh_servers()
         self._refresh_skills()
         self._refresh_projects()
@@ -775,7 +796,7 @@ class ChatScreen(Screen):
         self._sync_reasoning_switch()
         self.query_one("#chip-web", ToggleChip).set_value(bool(self.chat and self.chat.web_search))
         self.query_one("#chip-tools", ToggleChip).set_value(bool(self.chat and self.chat.tools))
-        self.query_one("#chip-plan", ToggleChip).set_value(bool(self.chat and self.chat.plan_mode))
+        self._sync_mode_chip()
         self.query_one("#chip-coding", ToggleChip).set_value(bool(self.chat and self.chat.coding))
         self._update_topbar()
         self._update_context_bar()
@@ -815,6 +836,39 @@ class ChatScreen(Screen):
         self._persist()
         self.notify(f"Reasoning effort: {self.chat.reasoning_effort or 'auto (model default)'}")
 
+    _MODES = ("build", "plan", "auto")
+    _MODE_NOTES = {
+        "build": "Build mode — I make changes and ask before each file/command action.",
+        "plan": "Plan mode — I'll propose a plan to approve, not make changes.",
+        "auto": "Auto mode — I make changes and run tools WITHOUT asking. Use with care.",
+    }
+
+    def _sync_mode_chip(self) -> None:
+        """Reflect build/plan/auto on the mode chip (lit when it's not the default 'build')."""
+        try:
+            chip = self.query_one("#chip-mode", Static)
+        except Exception:  # noqa: BLE001 — not mounted yet
+            return
+        mode = self.chat.mode if self.chat else "build"
+        chip.update(f"mode: {mode}")
+        chip.set_class(mode != "build", "-on")
+
+    def _cycle_mode(self) -> None:
+        """Click the mode chip: build → plan → auto → build."""
+        if not self.chat:
+            return
+        cur = self.chat.mode if self.chat.mode in self._MODES else "build"
+        self._set_mode(self._MODES[(self._MODES.index(cur) + 1) % len(self._MODES)])
+
+    def _set_mode(self, mode: str) -> None:
+        if not self.chat or mode not in self._MODES:
+            return
+        self.chat.mode = mode
+        self._sync_mode_chip()
+        self._update_topbar()
+        self.notify(self._MODE_NOTES[mode])
+        self._persist()
+
     def _update_topbar(self) -> None:
         if not self.chat:
             return
@@ -831,8 +885,10 @@ class ChatScreen(Screen):
         parts: list = [(self.chat.title, "bold"), "   ", (dim, "dim")]
         if self.chat.coding:
             parts += ["   ", ("● CODING", "bold #7fb069")]
-        if self.chat.plan_mode:
+        if self.chat.mode == "plan":
             parts += ["   ", ("● PLAN MODE", "bold #d19a66")]
+        elif self.chat.mode == "auto":
+            parts += ["   ", ("● AUTO", "bold #e06c75")]  # reddish: it acts without asking
         self.query_one("#chat-title", Static).update(Content.assemble(*parts))
 
     def _effective_context(self) -> Optional[int]:
@@ -856,21 +912,48 @@ class ChatScreen(Screen):
             return min(setting, model_max)
         return setting or model_max
 
-    def _update_context_bar(self) -> None:
-        """Show how much of the configured context the conversation uses (the
-        profile's --max-kv-size if set, else the model's window). Hidden when
-        neither can be determined ('if available')."""
-        bar = self.query_one("#context-bar", Static)
+    def _context_usage(self) -> Optional[tuple[int, int]]:
+        """(estimated tokens used, context window) for the current chat, or None when the
+        window can't be determined. Shared by the context bar and the 95% auto-compact check."""
+        if not self.chat:
+            return None
         window = self._effective_context()
-        if not self.chat or not window:
-            bar.update("")
-            return
+        if not window:
+            return None
         messages = build_openai_messages(self.chat, self._current_project(), self._skill_instructions())
         used = capabilities.estimate_prompt_tokens(messages)
         fs = self._fs_root()
         if fs:
             used += capabilities.approx_tokens(fs_tools.system_note(fs))
-        bar.update(_context_bar_markup(used, window))
+        return used, window
+
+    def _update_context_bar(self) -> None:
+        """Show how much of the configured context the conversation uses (the
+        profile's --max-kv-size if set, else the model's window). Hidden when
+        neither can be determined ('if available')."""
+        bar = self.query_one("#context-bar", Static)
+        usage = self._context_usage()
+        if not usage:
+            bar.update("")
+            return
+        bar.update(_context_bar_markup(*usage))
+
+    def _maybe_autocompact(self) -> None:
+        """Between runs (never mid-reply), auto-compact when the conversation passes 95% of the
+        context window — so a long chat doesn't start silently dropping its own earliest turns."""
+        if self._gen.get("main", False) or self._compacting or not self.chat:
+            return
+        usage = self._context_usage()
+        if not usage:
+            return
+        used, window = usage
+        if window < 2000 or used < int(window * 0.95):
+            return  # tiny windows can't fit a useful summary; below threshold → nothing to do
+        real = [m for m in self.chat.messages if m.role in ("user", "assistant")]
+        if len(real) < 3:
+            return  # a single oversized turn won't shrink by summarizing — don't thrash
+        self.notify("Context over 95% — compacting automatically to free up space.", timeout=6)
+        self._start_compaction(auto=True)
 
     # --- transcript / message widgets -----------------------------------
 
@@ -1140,10 +1223,6 @@ class ChatScreen(Screen):
             self.chat.web_search = val
         elif key == "tools":
             self.chat.tools = val
-        elif key == "plan":
-            self.chat.plan_mode = val
-            self.notify("Plan mode on — I'll propose a plan to approve, not make changes"
-                        if val else "Plan mode off")
         elif key == "coding":
             self.chat.coding = val
             self.notify("Coding mode on — senior-engineer prompt; the model validates its work"
@@ -1177,6 +1256,9 @@ class ChatScreen(Screen):
             return
         if wid == "chip-effort":
             self._cycle_effort()
+            return
+        if wid == "chip-mode":
+            self._cycle_mode()
             return
         if event.widget is not None and event.widget.has_class("msg-copy"):
             text = getattr(event.widget, "_copy_text", "")
@@ -1698,6 +1780,8 @@ class ChatScreen(Screen):
         if not self.chat:
             return
         text = self.query_one("#prompt", PromptArea).text.strip()
+        if self._handle_slash_command(text):
+            return  # a command (/plan, /compact, …) — consumed, not sent as a message
         if not text and not self._pending:
             return
         if not self.chat.base_url or not self.chat.model:
@@ -1718,6 +1802,100 @@ class ChatScreen(Screen):
         transcript.mount(self._message_widget(msg))
         self.call_after_refresh(self._scroll_end)
         self._generate()
+
+    # --- slash commands --------------------------------------------------
+
+    def _handle_slash_command(self, text: str) -> bool:
+        """Run a `/command` typed into the prompt. Returns True if it was a command (so the
+        caller doesn't also send it as a chat message)."""
+        cmd = text.strip().lower()
+        if cmd not in _SLASH_COMMANDS:
+            return False
+        self.query_one("#prompt", PromptArea).load_text("")  # clear the typed command
+        if cmd == "/help":
+            self.notify("Commands:  /build · /plan · /auto (modes)   ·   /compact — summarize the chat to free context",
+                        timeout=8)
+        elif cmd in ("/build", "/plan", "/auto"):
+            self._set_mode(cmd[1:])
+        elif cmd == "/compact":
+            self._start_compaction(auto=False)
+        return True
+
+    # --- context compaction ----------------------------------------------
+
+    def _compaction_messages(self) -> list[dict]:
+        """The request that asks the model to summarize the conversation. Plan/coding framing is
+        dropped so it produces a summary, not a plan or a code review (skill/project context is
+        harmless to keep), then the compact instruction is appended as the final user turn."""
+        summary_chat = self.chat.model_copy(update={"mode": "build", "coding": False})
+        messages = build_openai_messages(summary_chat, self._current_project(), self._skill_instructions())
+        messages.append({"role": "user", "content": _COMPACT_INSTRUCTIONS})
+        return messages
+
+    def _start_compaction(self, *, auto: bool) -> None:
+        """Kick off a compaction summary, unless one (or a reply) is already running."""
+        if self._gen.get("main", False) or self._compacting:
+            if not auto:
+                self.notify("Busy — wait for the current reply to finish.", severity="warning")
+            return
+        self._compaction_worker(auto)
+
+    @work(exit_on_error=False, group="compact")
+    async def _compaction_worker(self, auto: bool) -> None:
+        """Ask the model to summarize the conversation, then replace the history with that summary —
+        a user→assistant pair so role-alternating templates stay valid. Manual via /compact, or
+        automatic when context passes 95%."""
+        chat = self.chat
+        if not chat or not chat.base_url or not chat.model:
+            if not auto:
+                self.notify("Pick a server with a model first.", severity="warning")
+            return
+        real = [m for m in chat.messages if m.role in ("user", "assistant") and (m.text or m.attachments)]
+        if len(real) < 2:
+            if not auto:
+                self.notify("Not enough conversation to compact yet.", severity="warning")
+            return
+
+        transcript = self.query_one("#transcript", VerticalScroll)
+        self._compacting = True
+        self._set_generating("main", True)  # shows Stop; Esc cancels via the main cancel flag
+        cancel = self._cancel_cb("main")
+        thinking = await self._mount_thinking(transcript, "Compacting context…")
+        summary, error = "", None
+        try:
+            client = self._client()
+            async for kind, chunk in client.stream(self._compaction_messages(), cancel=cancel):
+                if kind == "content":
+                    summary += chunk
+        except Exception as exc:  # noqa: BLE001 — surface, but always clean up below
+            error = exc
+        finally:
+            try:
+                await thinking.remove()
+            except Exception:  # noqa: BLE001
+                pass
+            self._compacting = False
+            self._set_generating("main", False)
+
+        if error is not None:
+            self.notify(f"Compaction failed: {error}", severity="error", timeout=8)
+            return
+        if cancel():
+            self.notify("Compaction stopped.")
+            return
+        summary = summary.strip()
+        if not summary:
+            self.notify("Compaction produced no summary — leaving the history as-is.", severity="warning")
+            return
+        chat.messages = [
+            ChatMessage(role="user", text=_COMPACT_USER_MARKER),
+            ChatMessage(role="assistant", text=summary),
+        ]
+        chat.updated = chat.messages[-1].ts
+        self._render_transcript()
+        self._persist()
+        self._scroll_end()
+        self.notify("Context compacted — earlier turns summarized to free up space.")
 
     def _fs_root(self) -> Optional[str]:
         """The project's working directory if it exists on disk, else None."""
@@ -1740,6 +1918,7 @@ class ChatScreen(Screen):
         finally:
             # always clear the per-pane flag, so the Send button can never get stuck on "Stop"
             self._set_generating("main", False)
+            self._maybe_autocompact()  # between runs only — auto-summarize if context is nearly full
 
     # --- subagents (side chat) -------------------------------------------
 
@@ -2241,7 +2420,8 @@ class ChatScreen(Screen):
             if name == "web_search":
                 result = await chat_tools.run_web_search(args.get("query", ""), args.get("max_results", 6))
             elif fs_root and name in fs_tools.FS_TOOL_NAMES:
-                if name in fs_tools.MUTATING_TOOLS and not self._auto_approve_fs:
+                auto = self._auto_approve_fs or (self.chat is not None and self.chat.mode == "auto")
+                if name in fs_tools.MUTATING_TOOLS and not auto:
                     summary, detail = _perm_prompt(name, args)
                     decision = await self.app.push_screen_wait(PermissionModal(summary, detail))
                     if decision == "all":
@@ -2249,7 +2429,11 @@ class ChatScreen(Screen):
                     elif decision != "once":
                         body.update(Content.assemble((name, "bold"), "\n", ("✕ denied by the user", "#e06c75")))
                         return "The user DENIED this action. Do not retry it; ask how to proceed."
-                result = await fs_tools.run_fs_tool(fs_root, name, args)
+                if name == "open_in_browser":
+                    # must run on the UI thread (App.open_url), unlike the threaded fs ops
+                    result = self._open_in_browser(fs_root, args)
+                else:
+                    result = await fs_tools.run_fs_tool(fs_root, name, args)
             elif name in router:
                 result = await mcp_client.call_mcp(sessions, router, name, args)
             else:
@@ -2259,6 +2443,20 @@ class ChatScreen(Screen):
         preview = result if len(result) <= 500 else result[:500] + " …"
         body.update(Content.assemble((name, "bold"), "\n", (preview, "dim")))
         return result
+
+    def _open_in_browser(self, fs_root: str, args: dict) -> str:
+        """Resolve the model's target (a file in the working dir, or an http(s) URL) and open it
+        in the OS browser via the app. Confined to the working directory for local files."""
+        target = args.get("path") or args.get("url") or ""
+        try:
+            url = fs_tools.resolve_browser_target(fs_root, target)
+        except ValueError as exc:
+            return f"error: {exc}"
+        try:
+            self.app.open_url(url)
+        except Exception as exc:  # noqa: BLE001
+            return f"error: couldn't open the browser: {exc}"
+        return f"Opened {url} in the browser."
 
     def _current_project(self) -> Optional[Project]:
         if self.chat and self.chat.project_id:

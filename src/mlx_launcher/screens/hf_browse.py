@@ -19,7 +19,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static
+from textual.widgets import Button, Footer, Header, Input, Label, ProgressBar, RichLog, Static
 
 from .. import hf
 from ..widgets.toggle_chip import ToggleChip
@@ -66,6 +66,9 @@ class HFBrowseScreen(Screen):
             yield Static("", id="hf-budget")
             yield Static("Type a name and Search — e.g. “qwen3”, “llama 8b”, “gemma”.", id="hf-status")
             yield VerticalScroll(id="hf-results")
+            # total=1 (determinate, hidden) so the indeterminate animation timer is off until a
+            # download starts; _set_busy(True) flips it to total=None (the animated "loader").
+            yield ProgressBar(id="hf-progress", total=1, show_eta=True)
             yield RichLog(id="hf-log", markup=False, wrap=True, max_lines=4000)
         with Horizontal(id="hf-buttons"):
             yield Button("← Back to results", id="hf-back")
@@ -95,6 +98,7 @@ class HFBrowseScreen(Screen):
         if not self._allow_mlx:
             mlx_chip.tooltip = "MLX runs only on Apple Silicon"
         self.query_one("#hf-log", RichLog).display = False
+        self.query_one("#hf-progress", ProgressBar).display = False
         self.query_one("#hf-back", Button).display = False
         self.query_one("#hf-query", Input).focus()
 
@@ -235,27 +239,38 @@ class HFBrowseScreen(Screen):
         log = self.query_one("#hf-log", RichLog)
         log.display = True
         log.clear()
+        bar = self.query_one("#hf-progress", ProgressBar)
+        log.write(f"Resolving {repo_id} …")
         try:
             size = await asyncio.to_thread(hf.exact_to_fetch_bytes, repo_id, allow_patterns=allow_patterns)
-            if size is not None:
+            if size:
                 log.write(f"Will fetch {hf.human(size)} (already-cached files skipped).")
+                bar.update(total=size, progress=0)  # known size → a real (determinate) bar
                 if hf.fit(size, self._budget) == "too_big":
                     log.write("⚠ Larger than the recommended memory budget — it may run slowly or fail to load.")
         except hf.HFError:
             pass  # dry-run is best-effort; the download itself reports real errors
 
-        # download_model runs in a worker thread; marshal its progress lines back onto the
-        # UI thread. call_from_thread lives on App, not Screen.
+        # download_model runs in a worker thread; marshal its progress back onto the UI thread.
+        # call_from_thread lives on App, not Screen. Text lines → the log; byte counts → the bar
+        # (advances the determinate bar, or leaves the indeterminate "loader" pulsing if the
+        # dry-run gave no size).
         def on_progress(line: str) -> None:
             try:
                 self.app.call_from_thread(log.write, line)
             except Exception:  # noqa: BLE001 — the screen may have been dismissed mid-download
                 pass
 
+        def on_bytes(done: int, _total: int) -> None:
+            try:
+                self.app.call_from_thread(bar.update, progress=done)
+            except Exception:  # noqa: BLE001
+                pass
+
         try:
             await asyncio.to_thread(
                 hf.download_model, repo_id, on_progress,
-                allow_patterns=allow_patterns, cancel=lambda: self._cancel,
+                allow_patterns=allow_patterns, cancel=lambda: self._cancel, on_bytes=on_bytes,
             )
         except hf.HFCancelled:
             self.notify("Download cancelled", severity="warning")
@@ -279,6 +294,10 @@ class HFBrowseScreen(Screen):
         self.dismiss(HFResult(repo_id, fmt))
 
     def _set_busy(self, busy: bool) -> None:
+        bar = self.query_one("#hf-progress", ProgressBar)
+        if busy:
+            bar.update(total=None, progress=0)  # start as an indeterminate "loader" until size is known
+        bar.display = busy
         for wid in ("#hf-query", "#hf-go", "#hf-results", "#hf-back"):
             try:
                 self.query_one(wid).disabled = busy

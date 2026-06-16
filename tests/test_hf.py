@@ -134,6 +134,23 @@ def test_download_model_streams_progress_and_returns_path(monkeypatch):
     assert any("%" in line for line in lines)  # progress emitted from the tqdm hook
 
 
+def test_download_model_reports_byte_progress(monkeypatch):
+    # on_bytes drives the screen's progress bar — it must receive (done, total) byte counts.
+    seen = []
+
+    def fake_snap(repo, allow_patterns=None, token=None, tqdm_class=None):
+        bar = tqdm_class(total=200, unit="B")
+        bar.update(100)  # 50%
+        bar.update(100)  # 100%
+        return "/cache/x"
+
+    monkeypatch.setattr(hf, "_hf", lambda: _fake_hub(
+        snapshot_download=fake_snap, constants=SimpleNamespace(HF_HUB_CACHE="/cache")))
+    hf.download_model("org/x", lambda line: None,
+                      on_bytes=lambda done, total: seen.append((done, total)))
+    assert seen == [(100, 200), (200, 200)]
+
+
 def test_download_model_cancel(monkeypatch):
     lines = []
 
@@ -146,6 +163,33 @@ def test_download_model_cancel(monkeypatch):
     with pytest.raises(hf.HFCancelled):
         hf.download_model("org/x", lambda line: lines.append(line), cancel=lambda: True)
     assert any("Cancelled" in line for line in lines)
+
+
+# --- local cache (already-downloaded models) ------------------------------
+
+def test_cached_models_lists_newest_first_skips_datasets_and_detects_format(monkeypatch):
+    def repo(repo_id, files, size, modified, repo_type="model"):
+        rev = SimpleNamespace(files=[SimpleNamespace(file_name=f) for f in files])
+        return SimpleNamespace(repo_id=repo_id, repo_type=repo_type, size_on_disk=size,
+                               last_modified=modified, revisions=[rev])
+
+    info = SimpleNamespace(repos=[
+        repo("bartowski/Foo-GGUF", ["Foo-Q4_K_M.gguf", "mmproj-Foo.gguf"], 4_000_000_000, 100.0),
+        repo("mlx-community/Bar-4bit", ["model.safetensors", "config.json"], 3_000_000_000, 200.0),
+        repo("some/dataset", ["data.parquet"], 9, 999.0, repo_type="dataset"),  # not a model → skipped
+    ])
+    monkeypatch.setattr(hf, "_hf", lambda: _fake_hub(scan_cache_dir=lambda: info))
+    models = hf.cached_models()
+    assert [m.repo_id for m in models] == ["mlx-community/Bar-4bit", "bartowski/Foo-GGUF"]  # newest first
+    assert models[0].fmt == "mlx" and models[1].fmt == "gguf"  # .gguf (not the mmproj) ⇒ gguf
+    assert models[1].size_bytes == 4_000_000_000
+
+
+def test_cached_models_empty_when_cache_unreadable(monkeypatch):
+    def boom():
+        raise OSError("cache not found")
+    monkeypatch.setattr(hf, "_hf", lambda: _fake_hub(scan_cache_dir=boom))
+    assert hf.cached_models() == []  # best-effort: never raises into the editor
 
 
 # --- editor wiring --------------------------------------------------------
@@ -223,8 +267,10 @@ def test_hf_browse_download_flow_marshals_progress_and_dismisses(tmp_path, monke
     from mlx_launcher.app import MlxLauncherApp
     from mlx_launcher.screens.hf_browse import HFBrowseScreen, HFResult
 
-    def fake_dl(repo, on_progress, allow_patterns=None, cancel=None):
+    def fake_dl(repo, on_progress, allow_patterns=None, cancel=None, on_bytes=None):
         on_progress("fetching…")   # → self.app.call_from_thread(log.write, …) from a worker thread
+        if on_bytes is not None:
+            on_bytes(1234, 1234)   # → self.app.call_from_thread(bar.update, …) — drives the progress bar
         on_progress("done")
         return "/cache/" + repo.replace("/", "--")
 
@@ -271,3 +317,50 @@ def test_editor_mounts_search_hf_button(tmp_path, monkeypatch):
             assert scr.query_one("#model-row").query_one("#model")  # the model field sits in the row
 
     asyncio.run(go())
+
+
+def test_editor_model_field_suggests_downloaded_models(tmp_path, monkeypatch):
+    # focusing the empty model field opens a dropdown of already-downloaded HF models (so a model
+    # downloaded then abandoned at the editor is still reachable); picking one fills field + engine.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    import asyncio
+
+    from textual.widgets import OptionList, Select
+
+    from mlx_launcher.app import MlxLauncherApp
+    from mlx_launcher.screens.editor import EditorScreen
+    from mlx_launcher.widgets.path_input import PathInput
+
+    monkeypatch.setattr(hf, "cached_models", lambda: [
+        hf.LocalModel("mlx-community/Recent-4bit", "mlx", 3_000_000_000, 200.0),  # newest → top
+        hf.LocalModel("bartowski/Old-GGUF", "gguf", 4_000_000_000, 100.0),
+    ])
+
+    out = {}
+
+    async def go():
+        app = MlxLauncherApp()
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause(0.2)
+            await app.push_screen(EditorScreen())
+            await pilot.pause(0.2)
+            scr = app.screen
+            sug = scr.query_one("#model-suggest", OptionList)
+            assert sug.display is False                       # hidden until the field is focused
+            scr.query_one("#model", PathInput).focus()
+            for _ in range(40):                               # wait out the lazy cache-scan worker
+                await pilot.pause(0.05)
+                if sug.display:
+                    break
+            out["count"] = sug.option_count
+            await pilot.press("enter")                        # pick the highlighted (top) entry
+            await pilot.pause(0.1)
+            out["model"] = scr.query_one("#model", PathInput).value
+            out["engine"] = str(scr.query_one("#engine", Select).value)
+            out["open_after"] = sug.display
+
+    asyncio.run(go())
+    assert out["count"] == 2
+    assert out["model"] == "mlx-community/Recent-4bit"  # newest-first, top of the list
+    assert out["engine"] == "mlx-lm"                    # mlx-format model → an MLX engine
+    assert out["open_after"] is False                   # dropdown closes after a pick

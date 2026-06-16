@@ -30,6 +30,24 @@ def test_split_text_chunks_under_max_and_preserves_content():
     assert voice._split_text("   ") == []
 
 
+def test_fade_ends_zeros_edges_and_preserves_interior():
+    if importlib.util.find_spec("numpy") is None:
+        import pytest
+        pytest.skip("numpy (voice extra) not installed")
+    import numpy as np
+
+    sr = 24000
+    samples = np.ones(sr, dtype=np.float32)  # 1 s of full-scale DC — the worst case for an edge click
+    out = voice._fade_ends(samples, sr, ms=8.0)
+    n = int(sr * 8.0 / 1000.0)
+    assert out is not samples and samples[0] == 1.0          # original buffer not mutated
+    assert out[0] == 0.0 and out[-1] == 0.0                  # both edges ramped to zero (no click)
+    assert np.allclose(out[n:-n], 1.0)                       # interior untouched
+    # too-short input (< two ramp widths) is returned unchanged, never raising
+    short = np.ones(4, dtype=np.float32)
+    assert voice._fade_ends(short, sr) is short
+
+
 def test_mlx_whisper_repo_maps_sizes_and_passes_through_repo_ids():
     assert voice._mlx_whisper_repo("base") == voice._MLX_WHISPER_REPO["base"]
     assert voice._mlx_whisper_repo("BASE") == voice._MLX_WHISPER_REPO["base"]   # case-insensitive

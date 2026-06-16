@@ -9,6 +9,25 @@ def test_specs_cover_all_tool_names():
     assert names == fs_tools.FS_TOOL_NAMES
 
 
+def test_resolve_browser_target(tmp_path):
+    import pytest
+
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "index.html").write_text("<h1>x</h1>", encoding="utf-8")
+    root = str(tmp_path)
+
+    # http(s) URLs pass straight through
+    assert fs_tools.resolve_browser_target(root, "https://a.test/x") == "https://a.test/x"
+    assert fs_tools.resolve_browser_target(root, "http://a.test") == "http://a.test"
+    # a real file inside the working dir → a file:// URL
+    uri = fs_tools.resolve_browser_target(root, "out/index.html")
+    assert uri.startswith("file://") and uri.endswith("/out/index.html")
+    # escapes, absolute paths outside root, missing files, and empties are refused
+    for bad in ("../etc/passwd", "/etc/passwd", "out/missing.html", ""):
+        with pytest.raises(ValueError):
+            fs_tools.resolve_browser_target(root, bad)
+
+
 def test_write_read_edit_delete_list(tmp_path):
     root = str(tmp_path)
 
@@ -61,7 +80,8 @@ def test_edit_missing_text_and_file(tmp_path):
 
 
 def test_mutating_tools_are_the_write_ops():
-    assert fs_tools.MUTATING_TOOLS == {"write_file", "edit_file", "delete_path", "run_command"}
+    # write/exec ops plus open_in_browser (an outward action) are permission-gated
+    assert fs_tools.MUTATING_TOOLS == {"write_file", "edit_file", "delete_path", "run_command", "open_in_browser"}
     assert fs_tools.MUTATING_TOOLS < fs_tools.FS_TOOL_NAMES
     assert "read_file" not in fs_tools.MUTATING_TOOLS  # read-only ops run without asking
     assert "list_directory" not in fs_tools.MUTATING_TOOLS

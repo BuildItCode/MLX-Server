@@ -492,7 +492,7 @@ def test_coding_mode_injects_senior_engineer_system_prompt():
     off = build_openai_messages(Chat(messages=[ChatMessage(role="user", text="hi")]))
     assert off[0]["role"] == "user"
     # coding + plan both apply, plan kept LAST (most salient framing)
-    both = build_openai_messages(Chat(coding=True, plan_mode=True, messages=[ChatMessage(role="user", text="hi")]))
+    both = build_openai_messages(Chat(coding=True, mode="plan", messages=[ChatMessage(role="user", text="hi")]))
     sys = both[0]["content"]
     assert sys.index("senior software engineer") < sys.index("PLAN MODE")
 
@@ -546,7 +546,7 @@ def test_chip_changed_dispatch_updates_chat_flags():
     cs._update_topbar = lambda: None
     cs._persist = lambda: None
     cs.notify = lambda *a, **k: None
-    for key, field in [("web", "web_search"), ("tools", "tools"), ("plan", "plan_mode"),
+    for key, field in [("web", "web_search"), ("tools", "tools"),
                        ("coding", "coding"), ("reasoning", "reasoning")]:
         cs._chip_changed(ToggleChip.Changed(key, True))
         assert getattr(cs.chat, field) is True
@@ -1653,5 +1653,253 @@ def test_effort_chip_renders_and_hides_for_non_reasoning_models(tmp_path, monkey
             scr._sync_effort_chip()
             await pilot.pause()
             assert chip.has_class("hidden")
+
+    asyncio.run(go())
+
+
+# --- slash commands / compaction / browser tool ---------------------------
+
+def test_handle_slash_command_recognizes_known_commands():
+    # mode commands (/build /plan /auto), /compact, /help are intercepted; anything else (a path,
+    # a sentence that merely starts with "/") is NOT consumed and gets sent as a normal message.
+    from mlx_launcher.screens.chat import ChatScreen
+
+    cs = ChatScreen.__new__(ChatScreen)
+    cleared = []
+
+    class FakePrompt:
+        def load_text(self, t):
+            cleared.append(t)
+
+    cs.query_one = lambda *a, **k: FakePrompt()
+    cs.notify = lambda *a, **k: None
+    modes, compacted = [], []
+    cs._set_mode = lambda m: modes.append(m)
+    cs._start_compaction = lambda **k: compacted.append(k.get("auto"))
+
+    assert cs._handle_slash_command("/plan") is True
+    assert cs._handle_slash_command("/build") is True
+    assert cs._handle_slash_command("  /AUTO ") is True            # trim + case-insensitive
+    assert modes == ["plan", "build", "auto"]
+    assert cs._handle_slash_command("/compact") is True and compacted == [False]
+    assert cs._handle_slash_command("/help") is True
+    # not commands → not consumed (sent as a normal message)
+    assert cs._handle_slash_command("/plan the rollout next week") is False
+    assert cs._handle_slash_command("/usr/local/bin/thing") is False
+    assert cs._handle_slash_command("hello there") is False
+    assert cleared == ["", "", "", "", ""]  # cleared only for the five real commands
+
+
+def test_set_and_cycle_mode_updates_state_and_chip():
+    from mlx_launcher.chat.models import Chat
+    from mlx_launcher.screens.chat import ChatScreen
+
+    cs = ChatScreen.__new__(ChatScreen)
+    cs.chat = Chat(model="m")
+    labels = []
+
+    class FakeChip:
+        def update(self, text):
+            labels.append(text)
+
+        def set_class(self, *a, **k):
+            pass
+
+    cs.query_one = lambda *a, **k: FakeChip()
+    cs.notify = lambda *a, **k: None
+    cs._update_topbar = lambda: None
+    cs._persist = lambda: None
+
+    assert cs.chat.mode == "build"                 # default
+    cs._cycle_mode()
+    assert cs.chat.mode == "plan"                   # build → plan
+    cs._cycle_mode()
+    assert cs.chat.mode == "auto"                   # plan → auto
+    cs._cycle_mode()
+    assert cs.chat.mode == "build"                  # auto → build (wraps)
+    cs._set_mode("auto")
+    assert cs.chat.mode == "auto"
+    cs._set_mode("bogus")                           # invalid → ignored
+    assert cs.chat.mode == "auto"
+    assert labels[-1] == "mode: auto"               # chip reflects the current mode
+
+
+def test_maybe_autocompact_only_when_idle_and_over_threshold():
+    from mlx_launcher.chat.models import Chat, ChatMessage
+    from mlx_launcher.screens.chat import ChatScreen
+
+    cs = ChatScreen.__new__(ChatScreen)
+    cs.chat = Chat(model="m", messages=[
+        ChatMessage(role="user", text="a"), ChatMessage(role="assistant", text="b"),
+        ChatMessage(role="user", text="c"),
+    ])
+    cs._gen = {"main": False}
+    cs._compacting = False
+    cs.notify = lambda *a, **k: None
+    started = []
+    cs._start_compaction = lambda **k: started.append(k.get("auto"))
+
+    cs._context_usage = lambda: (9600, 10000)  # 96% of a healthy window → auto-compact
+    cs._maybe_autocompact()
+    assert started == [True]
+
+    started.clear()
+    cs._context_usage = lambda: (5000, 10000)  # under 95% → nothing
+    cs._maybe_autocompact()
+    assert started == []
+
+    cs._context_usage = lambda: (9600, 10000)
+    cs._gen = {"main": True}                    # mid-reply → never
+    cs._maybe_autocompact()
+    assert started == []
+
+    cs._gen = {"main": False}
+    cs._context_usage = lambda: (1950, 1990)    # window too small to fit a summary → skip
+    cs._maybe_autocompact()
+    assert started == []
+
+    cs._context_usage = lambda: (9600, 10000)
+    cs.chat.messages = [ChatMessage(role="user", text="x" * 100000)]  # one giant turn → don't thrash
+    cs._maybe_autocompact()
+    assert started == []
+
+
+def test_open_in_browser_opens_local_file_and_rejects_escape(tmp_path, monkeypatch):
+    from mlx_launcher.screens.chat import ChatScreen
+
+    opened = []
+
+    class FakeApp:
+        def open_url(self, url, **k):
+            opened.append(url)
+
+    monkeypatch.setattr(ChatScreen, "app", property(lambda self: FakeApp()))
+    cs = ChatScreen.__new__(ChatScreen)
+    (tmp_path / "page.html").write_text("<h1>hi</h1>", encoding="utf-8")
+    root = str(tmp_path)
+
+    res = cs._open_in_browser(root, {"path": "page.html"})
+    assert opened and opened[0].startswith("file://") and opened[0].endswith("page.html")
+    assert "Opened" in res
+    opened.clear()
+    assert cs._open_in_browser(root, {"path": "https://example.com"}) and opened == ["https://example.com"]
+    # confinement + existence enforced; the browser is never opened on a bad target
+    opened.clear()
+    assert cs._open_in_browser(root, {"path": "../secret.txt"}).startswith("error")
+    assert cs._open_in_browser(root, {"path": "missing.html"}).startswith("error")
+    assert opened == []
+
+
+def test_slash_plan_command_sets_plan_mode_in_app(tmp_path, monkeypatch):
+    # end-to-end: typing /plan into the prompt and sending sets plan mode + reflects on the mode
+    # chip, and the command text is consumed (not sent as a message).
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    import asyncio
+
+    from textual.widgets import Static
+
+    from mlx_launcher.app import MlxLauncherApp
+    from mlx_launcher.screens.chat import ChatScreen, PromptArea
+
+    async def go():
+        app = MlxLauncherApp()
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.pause(0.2)
+            await app.push_screen(ChatScreen())
+            await pilot.pause(0.3)
+            scr = app.screen
+            n0 = len(scr.chat.messages)
+            scr.query_one("#prompt", PromptArea).load_text("/plan")
+            scr.action_send()
+            await pilot.pause(0.1)
+            assert scr.chat.mode == "plan"
+            assert scr.query_one("#chip-mode", Static).has_class("-on")  # lit for a non-build mode
+            assert scr.query_one("#prompt", PromptArea).text == ""   # consumed
+            assert len(scr.chat.messages) == n0                       # nothing was sent
+            # /auto then drops to no-permission mode
+            scr.query_one("#prompt", PromptArea).load_text("/auto")
+            scr.action_send()
+            await pilot.pause(0.1)
+            assert scr.chat.mode == "auto"
+
+    asyncio.run(go())
+
+
+def test_chat_mode_migrates_legacy_plan_mode_flag():
+    # chats saved before the 3-way mode used a plan_mode bool → it maps to mode="plan"
+    from mlx_launcher.chat.models import Chat
+
+    assert Chat().mode == "build"                       # default
+    assert Chat(plan_mode=True).mode == "plan"          # legacy true → plan
+    assert Chat(plan_mode=False).mode == "build"        # legacy false → build
+    assert Chat(plan_mode=True, mode="auto").mode == "auto"  # an explicit mode wins
+    assert not hasattr(Chat(plan_mode=True), "plan_mode")    # the old field is gone
+
+
+def test_compaction_messages_drop_plan_and_coding_framing():
+    # /compact must summarize, not produce a plan/code review — so the summary request strips
+    # plan/coding framing and ends with the compact instruction.
+    from mlx_launcher.chat.models import Chat, ChatMessage
+    from mlx_launcher.screens.chat import ChatScreen, _COMPACT_INSTRUCTIONS
+
+    cs = ChatScreen.__new__(ChatScreen)
+    cs.chat = Chat(model="m", mode="plan", coding=True, messages=[
+        ChatMessage(role="user", text="build a thing"),
+        ChatMessage(role="assistant", text="done"),
+    ])
+    cs._current_project = lambda: None
+    cs._skill_instructions = lambda: None
+
+    msgs = cs._compaction_messages()
+    blob = "\n".join(m.get("content", "") for m in msgs if isinstance(m.get("content"), str))
+    assert "PLAN MODE" not in blob and "senior software engineer" not in blob  # framing stripped
+    assert msgs[-1]["role"] == "user" and msgs[-1]["content"] == _COMPACT_INSTRUCTIONS
+    assert cs.chat.mode == "plan" and cs.chat.coding is True  # original chat untouched
+
+
+def test_auto_mode_auto_approves_mutating_tools(tmp_path, monkeypatch):
+    # auto mode runs file/command tools WITHOUT a permission prompt; build mode still asks.
+    import asyncio
+
+    from mlx_launcher.chat.models import Chat
+    from mlx_launcher.screens.chat import ChatScreen
+
+    prompted = []
+
+    class FakeApp:
+        async def push_screen_wait(self, screen):
+            prompted.append(screen)
+            return "deny"  # if we ever ask, deny it
+
+    monkeypatch.setattr(ChatScreen, "app", property(lambda self: FakeApp()))
+
+    class FakeBody:
+        def update(self, *a, **k):
+            pass
+
+    class FakeTranscript:
+        async def mount(self, *a, **k):
+            pass
+
+    def make(mode):
+        cs = ChatScreen.__new__(ChatScreen)
+        cs.chat = Chat(model="m", mode=mode)
+        cs._auto_approve_fs = False
+        cs._bubble = lambda *a, **k: (object(), FakeBody())
+        cs._scroll_end = lambda: None
+        return cs
+
+    async def go():
+        cs = make("auto")  # auto → writes without ever prompting
+        res = await cs._exec_tool("write_file", {"path": "a.txt", "content": "hi"},
+                                  {}, {}, FakeTranscript(), str(tmp_path))
+        assert "wrote" in res and prompted == []
+        assert (tmp_path / "a.txt").read_text() == "hi"
+
+        cs2 = make("build")  # build → asks; our fake denies → not written
+        res2 = await cs2._exec_tool("write_file", {"path": "b.txt", "content": "x"},
+                                    {}, {}, FakeTranscript(), str(tmp_path))
+        assert prompted and "DENIED" in res2
+        assert not (tmp_path / "b.txt").exists()
 
     asyncio.run(go())

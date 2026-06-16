@@ -27,16 +27,19 @@ FS_TOOL_NAMES = {
     "edit_file",
     "delete_path",
     "run_command",
+    "open_in_browser",
 }
 
-# Tools that change the user's files/system — gated behind a permission prompt.
+# Tools that change the user's files/system or act outward — gated behind a permission prompt.
 # Read-only tools (list_directory, read_file) run without asking.
-MUTATING_TOOLS = {"write_file", "edit_file", "delete_path", "run_command"}
+MUTATING_TOOLS = {"write_file", "edit_file", "delete_path", "run_command", "open_in_browser"}
 
 SYSTEM_NOTE = (
     "You have file tools scoped to this project's working directory:\n  {root}\n"
     "Use list_directory, read_file, write_file, edit_file, delete_path, and run_command "
     "to work in it. All paths are RELATIVE to the working directory.\n"
+    "When you build something viewable in a browser (an HTML page, a local web app), call "
+    "open_in_browser with its path so the user can see it.\n"
     "Inspect files before editing, make focused changes, and briefly explain what you did."
 )
 
@@ -82,6 +85,12 @@ def fs_specs() -> list[dict]:
              {"path": {"type": "string"}}, ["path"]),
         spec("run_command", "Run a shell command in the working directory; returns its combined stdout/stderr.",
              {"command": {"type": "string"}}, ["command"]),
+        spec("open_in_browser",
+             "Open a file you created (e.g. an HTML page) or an http(s) URL in the user's web browser "
+             "so they can see it. Use this after building something viewable.",
+             {"path": {"type": "string",
+                       "description": "a file path relative to the working directory, or an http(s):// URL"}},
+             ["path"]),
     ]
 
 
@@ -98,6 +107,21 @@ def _resolve(root: str, rel: str) -> Path:
     if target != base and base not in target.parents:
         raise ValueError(f"path escapes the working directory: {rel!r}")
     return target
+
+
+def resolve_browser_target(root: str, target: str) -> str:
+    """A URL the chat may hand to the OS browser: an ``http(s)://`` URL as-is, or a file inside
+    the working directory resolved to a ``file://`` URL. Raises ValueError if it escapes the root
+    or doesn't exist — so the model can't point the browser at arbitrary local files."""
+    t = (target or "").strip()
+    if not t:
+        raise ValueError("nothing to open")
+    if t.startswith(("http://", "https://")):
+        return t
+    p = _resolve(root, t)  # confined to the working directory (raises on escape)
+    if not p.exists():
+        raise ValueError(f"not found: {target}")
+    return p.as_uri()
 
 
 # --- operations ----------------------------------------------------------

@@ -297,10 +297,12 @@ def human(n: Optional[int]) -> str:
 
 # --- download -------------------------------------------------------------
 
-def _progress_tqdm(on_progress: ProgressCb, cancel: Optional[Callable[[], bool]]):
+def _progress_tqdm(on_progress: ProgressCb, cancel: Optional[Callable[[], bool]],
+                   on_bytes: Optional[Callable[[int, int], None]] = None):
     """A tqdm subclass for snapshot_download's aggregated bytes bar: forwards throttled
-    `done/total` lines to `on_progress`, renders nothing to the terminal, and raises
-    HFCancelled (best-effort interrupt) when `cancel()` turns true."""
+    `done/total` lines to `on_progress` (and the same numbers to `on_bytes`, if given, to drive
+    a progress bar), renders nothing to the terminal, and raises HFCancelled (best-effort
+    interrupt) when `cancel()` turns true."""
     from tqdm.auto import tqdm as _Tqdm
 
     class _ProgressTqdm(_Tqdm):
@@ -328,6 +330,8 @@ def _progress_tqdm(on_progress: ProgressCb, cancel: Optional[Callable[[], bool]]
                 if pct != self._last_pct:
                     self._last_pct = pct
                     on_progress(f"  ↓ {human(int(self.n))} / {human(int(total))}  ({pct}%)")
+                    if on_bytes is not None:
+                        on_bytes(int(self.n), int(total))
             return True
 
     return _ProgressTqdm
@@ -339,10 +343,12 @@ def download_model(
     *,
     allow_patterns: Optional[list[str]] = None,
     cancel: Optional[Callable[[], bool]] = None,
+    on_bytes: Optional[Callable[[int, int], None]] = None,
 ) -> str:
     """Download `repo_id` (optionally only `allow_patterns`) into the HuggingFace cache,
-    streaming progress to `on_progress`. Returns the local snapshot path. Blocking + heavy —
-    MUST run in a worker thread. Raises HFCancelled if cancelled, HFError on failure."""
+    streaming progress to `on_progress` (and `(done, total)` byte counts to `on_bytes`, if given,
+    for a progress bar). Returns the local snapshot path. Blocking + heavy — MUST run in a worker
+    thread. Raises HFCancelled if cancelled, HFError on failure."""
     hub = _hf()
     try:
         from huggingface_hub import constants as _const
@@ -357,7 +363,7 @@ def download_model(
         with silence_native_stderr():
             path = hub.snapshot_download(
                 repo_id, allow_patterns=allow_patterns, token=_token(),
-                tqdm_class=_progress_tqdm(on_progress, cancel),
+                tqdm_class=_progress_tqdm(on_progress, cancel, on_bytes),
             )
     except HFCancelled:
         on_progress("Cancelled — the partial download stays cached and resumes next time.")
@@ -366,3 +372,51 @@ def download_model(
         raise HFError(_explain(exc)) from exc
     on_progress("✓ download complete")
     return path
+
+
+# --- local cache (already-downloaded models) -----------------------------
+
+@dataclass(frozen=True)
+class LocalModel:
+    repo_id: str
+    fmt: str            # "gguf" | "mlx"
+    size_bytes: int
+    last_modified: float
+
+
+def _cached_repo_format(repo) -> str:
+    """gguf if the cached repo has any .gguf weight file, else mlx — enough to pick the engine."""
+    for rev in getattr(repo, "revisions", None) or []:
+        for f in getattr(rev, "files", None) or []:
+            name = (getattr(f, "file_name", "") or "").lower()
+            if name.endswith(".gguf") and "mmproj" not in name:
+                return "gguf"
+    return "mlx"
+
+
+def cached_models() -> list[LocalModel]:
+    """Models already downloaded into the local HuggingFace cache, newest first.
+
+    This is how a model downloaded via the HF browser is still reachable after you cancel the
+    editor without saving — it lives in the cache, just not in any saved profile. Best-effort:
+    returns [] when there's no cache yet or it can't be read. Blocking (stats the cache on disk)
+    — call via asyncio.to_thread."""
+    try:
+        info = _hf().scan_cache_dir()
+    except Exception:  # noqa: BLE001 — no cache dir yet, or an unreadable/corrupt one
+        return []
+    out: list[LocalModel] = []
+    for repo in getattr(info, "repos", None) or []:
+        if getattr(repo, "repo_type", "model") != "model":
+            continue  # skip cached datasets / spaces — only models go in the field
+        repo_id = getattr(repo, "repo_id", "") or ""
+        if not repo_id:
+            continue
+        out.append(LocalModel(
+            repo_id=repo_id,
+            fmt=_cached_repo_format(repo),
+            size_bytes=int(getattr(repo, "size_on_disk", 0) or 0),
+            last_modified=float(getattr(repo, "last_modified", 0) or 0),
+        ))
+    out.sort(key=lambda m: m.last_modified, reverse=True)
+    return out

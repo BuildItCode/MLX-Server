@@ -364,7 +364,7 @@ def build_openai_messages(
     ]
     if getattr(chat, "coding", False):
         parts.append(CODING_MODE_INSTRUCTIONS)
-    if getattr(chat, "plan_mode", False):
+    if getattr(chat, "mode", "build") == "plan":
         parts.append(PLAN_MODE_INSTRUCTIONS)  # last = the most salient framing
     if parts:
         msgs.append({"role": "system", "content": "\n\n---\n\n".join(parts)})
