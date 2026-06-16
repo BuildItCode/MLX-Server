@@ -143,6 +143,7 @@ class ServerManager:
 
         self.proc = await asyncio.create_subprocess_exec(
             *argv,
+            limit=2 ** 20,  # 1 MB line buffer — model servers emit long progress/JSON/traceback lines
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=os.environ.copy(),
@@ -162,8 +163,13 @@ class ServerManager:
         while True:
             try:
                 line = await stream.readline()
-            except (asyncio.CancelledError, ValueError):
+            except asyncio.CancelledError:
                 break
+            except ValueError:
+                # A single line exceeded the buffer limit. readline() drops it from the buffer
+                # and raises — keep reading subsequent lines instead of going dark forever.
+                self._emit_log(name, "⋯ (overlong log line skipped)")
+                continue
             if not line:
                 break
             self._emit_log(name, line.decode(errors="replace").rstrip("\n"))
@@ -252,9 +258,23 @@ class ServerManager:
         proc = self.proc
         if proc is None:
             return False
+        if proc.returncode is not None:  # the loop's watcher already reaped it
+            return False
         if sys.platform == "win32":
             # os.kill(pid, 0) *terminates* the process on Windows — never probe with it.
-            return proc.returncode is None
+            return True
+        # During the synchronous shutdown loop the event loop can't run, so a SIGTERM'd child
+        # becomes a zombie that os.kill(pid, 0) still reports as alive — which would waste the
+        # full grace period on every quit. Once we're stopping, reap it directly (WNOHANG).
+        # Gated on `_stopping` so we don't race the loop's own reaper during normal operation.
+        if self._stopping:
+            try:
+                reaped, _ = os.waitpid(proc.pid, os.WNOHANG)
+            except ChildProcessError:
+                return False  # already reaped elsewhere
+            except OSError:
+                return True
+            return reaped == 0  # 0 → still running; nonzero → we just reaped it (it's dead)
         try:
             os.kill(proc.pid, 0)
             return True

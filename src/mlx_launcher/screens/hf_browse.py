@@ -247,7 +247,10 @@ class HFBrowseScreen(Screen):
         # download_model runs in a worker thread; marshal its progress lines back onto the
         # UI thread. call_from_thread lives on App, not Screen.
         def on_progress(line: str) -> None:
-            self.app.call_from_thread(log.write, line)
+            try:
+                self.app.call_from_thread(log.write, line)
+            except Exception:  # noqa: BLE001 — the screen may have been dismissed mid-download
+                pass
 
         try:
             await asyncio.to_thread(
@@ -298,10 +301,13 @@ class HFBrowseScreen(Screen):
         self._close_or_cancel()
 
     def _close_or_cancel(self) -> None:
-        if self._downloading:
+        if self._downloading and not self._cancel:
+            # first press: ask the download to stop cooperatively
             self._cancel = True
-            self.query_one("#hf-log", RichLog).write("Cancelling…")
+            self.query_one("#hf-log", RichLog).write(
+                "Cancelling… (press Close again to leave now; a partial download resumes next time)")
             return
+        # not downloading, or a second press while a stalled transfer hasn't observed the cancel
         self.dismiss(None)
 
     def _status(self, text: str) -> None:

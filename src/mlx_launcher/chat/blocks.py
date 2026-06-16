@@ -9,9 +9,20 @@ _OPEN = re.compile(r"^\s*```([\w+.-]*)\s*$")
 _CLOSE = re.compile(r"^\s*```\s*$")
 
 _INLINE_CODE = re.compile(r"`[^`\n]*`")
-# a bare http(s) URL not already inside link syntax (`[..](..)`, `<..>`, `[..]`),
-# excluding trailing sentence punctuation
-_BARE_URL = re.compile(r"""(?<![\[(<])\bhttps?://[^\s<>()\[\]`"']*[^\s<>()\[\]`"'.,;:!?]""")
+# a bare http(s) URL not already inside link syntax (`[..](..)`, `<..>`, `[..]`). Parens ARE
+# allowed in the body (Wikipedia-style); trailing punctuation / unbalanced ')' are trimmed below.
+_BARE_URL = re.compile(r"""(?<![\[(<])\bhttps?://[^\s<>\[\]`"']+""")
+
+
+def _clean_url(url: str) -> str:
+    """Drop trailing sentence punctuation and any unbalanced trailing ')' — so a URL with
+    balanced parens (e.g. `…/Python_(programming_language)`) stays whole, but a URL written
+    inside prose like `(see https://x.com)` doesn't swallow the closing paren."""
+    while url and url[-1] in ".,;:!?":
+        url = url[:-1]
+    while url.endswith(")") and url.count(")") > url.count("("):
+        url = url[:-1]
+    return url
 
 
 def linkify_urls(text: str) -> str:
@@ -19,7 +30,16 @@ def linkify_urls(text: str) -> str:
     (Rich Markdown only links `[text](url)`, not the bare URLs LLMs commonly emit). Leaves
     URLs already inside link/autolink syntax and inside inline-code spans untouched."""
     def sub(s: str) -> str:
-        return _BARE_URL.sub(lambda m: f"[{m.group(0)}]({m.group(0)})", s)
+        def repl(m: "re.Match[str]") -> str:
+            url = _clean_url(m.group(0))
+            if not url:
+                return m.group(0)
+            trailing = m.group(0)[len(url):]  # re-emit trimmed chars outside the link
+            # angle-bracket a destination containing parens so the Markdown parser doesn't
+            # truncate it at the first ')'.
+            dest = f"<{url}>" if ("(" in url or ")" in url) else url
+            return f"[{url}]({dest}){trailing}"
+        return _BARE_URL.sub(repl, s)
 
     out, pos = [], 0
     for code in _INLINE_CODE.finditer(text):  # skip inline-code spans verbatim

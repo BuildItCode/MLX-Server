@@ -228,19 +228,14 @@ def _loads_lenient(raw: str) -> dict:
     start = raw.find("{")
     if start == -1:
         return {}
-    depth = 0
-    for i in range(start, len(raw)):
-        if raw[i] == "{":
-            depth += 1
-        elif raw[i] == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    obj = json.loads(raw[start:i + 1])
-                    return obj if isinstance(obj, dict) else {}
-                except ValueError:
-                    return {}
-    return {}
+    # raw_decode parses ONE JSON value from `start` and ignores trailing junk — and it's
+    # string-aware, so a `}` inside a string value (e.g. {"content": "if (x) { }"}) doesn't
+    # prematurely end the object the way naive brace-counting did.
+    try:
+        obj, _end = json.JSONDecoder().raw_decode(raw, start)
+    except ValueError:
+        return {}
+    return obj if isinstance(obj, dict) else {}
 
 
 def parse_harmony_tool_calls(text: str) -> list[dict]:
@@ -273,16 +268,23 @@ def recover_loose_tool_calls(text: str, tool_names: list[str]) -> list[dict]:
     for name in tool_names:
         if not name:
             continue
-        idx = text.find(name)
-        if idx == -1:
-            continue
-        tail = text[idx + len(name):]
-        bridge = _LOOSE_BRIDGE.match(tail)
-        if bridge is None:
-            continue
-        obj = _loads_lenient(tail[bridge.end() - 1:])  # from the '{'
-        if obj:
-            out.append({"name": name, "arguments": obj})
+        # Scan EVERY occurrence of the name, not just the first: gpt-oss commonly narrates
+        # ("I'll use web_search …") before emitting the actual `web_search{…}` call, so the
+        # first mention is prose and the real call is later. Take the first that parses.
+        start = 0
+        while True:
+            idx = text.find(name, start)
+            if idx == -1:
+                break
+            start = idx + len(name)
+            tail = text[idx + len(name):]
+            bridge = _LOOSE_BRIDGE.match(tail)
+            if bridge is None:
+                continue
+            obj = _loads_lenient(tail[bridge.end() - 1:])  # from the '{'
+            if obj:
+                out.append({"name": name, "arguments": obj})
+                break
     return out
 
 
@@ -343,7 +345,7 @@ def prepend_system(messages: list[dict], note: str) -> list[dict]:
     if not note:
         return messages
     if messages and messages[0].get("role") == "system":
-        messages[0] = {**messages[0], "content": f"{note}\n\n---\n\n{messages[0]['content']}"}
+        messages[0] = {**messages[0], "content": f"{note}\n\n---\n\n{messages[0].get('content', '')}"}
     else:
         messages.insert(0, {"role": "system", "content": note})
     return messages

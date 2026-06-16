@@ -65,13 +65,24 @@ def _silence_stderr_fd():
     bypassing Python — which would glitch the TUI. Runs in the transcription worker thread; the
     screen renders on stdout, so this is safe and the fd is always restored."""
     saved = None
+    devnull = None
     try:
         saved = os.dup(2)
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, 2)
-        os.close(devnull)
     except Exception:  # noqa: BLE001
-        saved = None
+        if saved is not None:  # don't leak the duped fd if open/dup2 failed
+            try:
+                os.close(saved)
+            except Exception:  # noqa: BLE001
+                pass
+            saved = None
+    finally:
+        if devnull is not None:
+            try:
+                os.close(devnull)
+            except Exception:  # noqa: BLE001
+                pass
     try:
         yield
     finally:
@@ -442,6 +453,9 @@ class Speaker:
             sd.play(audio, int(sample_rate), latency="high")
         except Exception:  # noqa: BLE001 — some backends reject the latency hint
             sd.play(audio, int(sample_rate))
+        if self._stop.is_set():  # stop() raced in just as playback started → cut it immediately
+            sd.stop()
+            return
         sd.wait()  # returns early when stop() calls sd.stop()
 
     def _run_system(self, text: str) -> None:
@@ -451,4 +465,10 @@ class Speaker:
         if self._stop.is_set():
             return
         self._proc = subprocess.Popen(argv)
+        if self._stop.is_set():  # stop() raced in right after spawn → terminate immediately
+            try:
+                self._proc.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+            return
         self._proc.wait()

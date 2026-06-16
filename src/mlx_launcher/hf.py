@@ -103,13 +103,24 @@ def _silence_native_stderr():
     Python logging — which would glitch the TUI. Downloads run in a worker thread and the
     screen renders on stdout, so briefly muting fd 2 here is safe; the fd is always restored."""
     saved = None
+    devnull = None
     try:
         saved = os.dup(2)
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, 2)
-        os.close(devnull)
     except Exception:  # noqa: BLE001 — if dup/dup2 isn't available, just don't silence
-        saved = None
+        if saved is not None:  # don't leak the duped fd if open/dup2 failed
+            try:
+                os.close(saved)
+            except Exception:  # noqa: BLE001
+                pass
+            saved = None
+    finally:
+        if devnull is not None:
+            try:
+                os.close(devnull)
+            except Exception:  # noqa: BLE001
+                pass
     try:
         yield
     finally:

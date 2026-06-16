@@ -53,9 +53,9 @@ class ServerConfig(BaseModel):
     # (0.31.3) has no such flags, so these are emitted only for the mlx-vlm engine.
     kv_bits: Optional[str] = None            # bits for KV quantization, e.g. "8", "4", "3.5"
     kv_quant_scheme: Optional[str] = None    # "uniform" | "turboquant"
-    kv_group_size: Optional[int] = None      # group size for uniform quantization (e.g. 64)
-    max_kv_size: Optional[int] = None        # cap the KV cache (context) at N tokens
-    quantized_kv_start: Optional[int] = None  # token index at which to start quantizing
+    kv_group_size: Optional[int] = Field(None, ge=1)   # group size for uniform quantization (e.g. 64)
+    max_kv_size: Optional[int] = Field(None, ge=1)     # cap the KV cache (context) at N tokens
+    quantized_kv_start: Optional[int] = Field(None, ge=0)  # token index at which to start quantizing
 
     # vllm-mlx ONLY (`vllm-mlx serve …`). KV quantization there reuses kv_bits
     # (4 or 8) / kv_group_size / max_kv_size above.
@@ -79,13 +79,13 @@ class ServerConfig(BaseModel):
     log_level: LogLevel = "INFO"
     allowed_origins: Optional[str] = None
     draft_model: Optional[str] = None
-    num_draft_tokens: Optional[int] = None
+    num_draft_tokens: Optional[int] = Field(None, ge=1)
     chat_template: Optional[str] = None
     use_default_chat_template: bool = False
     chat_template_args: Optional[str] = None  # JSON string
-    decode_concurrency: Optional[int] = None
-    prompt_concurrency: Optional[int] = None
-    prefill_step_size: Optional[int] = None
+    decode_concurrency: Optional[int] = Field(None, ge=1)
+    prompt_concurrency: Optional[int] = Field(None, ge=1)
+    prefill_step_size: Optional[int] = Field(None, ge=1)
     pipeline: bool = False
 
     # App-specific

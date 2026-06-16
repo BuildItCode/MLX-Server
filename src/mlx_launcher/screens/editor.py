@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 from typing import Optional
 
 from textual import events, on
@@ -396,6 +397,12 @@ class EditorScreen(Screen):
                 raise ValueError("vllm-mlx KV bits must be 4 or 8")
         # turboquant toggle drives the scheme; only meaningful with KV quant on (mlx-vlm)
         kv_scheme = "turboquant" if (sw("turboquant") and kv_bits) else None
+        custom = s("custom_params")
+        if custom:
+            try:
+                shlex.split(custom)  # the launch + preview split this; reject unbalanced quotes here
+            except ValueError as exc:
+                raise ValueError(f"Custom params: {exc} — check the quotes")
 
         kwargs = dict(
             name=name,
@@ -440,7 +447,7 @@ class EditorScreen(Screen):
             use_default_chat_template=sw("use_default_chat_template"),
             pipeline=sw("pipeline"),
             mlx_server_path=opt_str("mlx_server_path"),
-            custom_params=s("custom_params"),
+            custom_params=custom,
         )
         if self.server is not None:
             kwargs["id"] = self.server.id
@@ -502,11 +509,12 @@ class EditorScreen(Screen):
     def _update_preview(self) -> None:
         try:
             cfg = self._collect()
+            if cfg.engine == "llama-cpp":  # show the resolved .gguf file, as the launch will use it
+                cfg = cfg.model_copy(update={"model": discovery.resolve_gguf(cfg.model)})
+            preview = flags.preview_command(cfg)  # inside the try: shlex.split can raise on bad quotes
         except Exception:
             return
-        if cfg.engine == "llama-cpp":  # show the resolved .gguf file, as the launch will use it
-            cfg = cfg.model_copy(update={"model": discovery.resolve_gguf(cfg.model)})
-        self.query_one("#cmd-preview", Label).update(Content(f"$ {flags.preview_command(cfg)}"))
+        self.query_one("#cmd-preview", Label).update(Content(f"$ {preview}"))
 
     @on(Button.Pressed, "#save")
     def _on_save(self) -> None:

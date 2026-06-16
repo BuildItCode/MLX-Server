@@ -160,7 +160,9 @@ def estimate_prompt_tokens(messages: list[dict]) -> int:
             total += approx_tokens(content)
         elif isinstance(content, list):  # multimodal parts
             for part in content:
-                if part.get("type") == "text":
+                if isinstance(part, str):
+                    total += approx_tokens(part)
+                elif isinstance(part, dict) and part.get("type") == "text":
                     total += approx_tokens(part.get("text", ""))
                 else:
                     total += 800  # rough image cost

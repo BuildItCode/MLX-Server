@@ -123,6 +123,7 @@ async def run_streamed(argv: list[str], on_log: LogCb, env: Optional[dict] = Non
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
+            limit=2 ** 20,  # 1 MB line buffer — installers emit long resolver/progress lines
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             env=env,
@@ -132,7 +133,13 @@ async def run_streamed(argv: list[str], on_log: LogCb, env: Optional[dict] = Non
         return -1
     assert proc.stdout is not None
     while True:
-        line = await proc.stdout.readline()
+        try:
+            line = await proc.stdout.readline()
+        except ValueError:
+            # an overlong line exceeded the buffer limit; readline() drops it — keep going
+            # instead of crashing the install/download with an uncaught ValueError.
+            on_log("⋯ (overlong output line skipped)")
+            continue
         if not line:
             break
         on_log(line.decode(errors="replace").rstrip("\n"))

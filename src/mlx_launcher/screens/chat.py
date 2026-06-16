@@ -1144,7 +1144,11 @@ class ChatScreen(Screen):
         style = getattr(event, "style", None)
         link = getattr(style, "link", None) if style else None
         if link:
-            self.app.open_url(link)
+            # links inside a Markdown widget are already opened by @on(Markdown.LinkClicked);
+            # skip them here so the same click isn't handled (and opened) twice.
+            w = event.widget
+            if w is None or not any(isinstance(a, Markdown) for a in w.ancestors_with_self):
+                self.app.open_url(link)
             return
         wid = getattr(event.widget, "id", None)
         if wid == "chip-connectors":  # a plain Static, not a toggle → open the popup
@@ -1554,6 +1558,9 @@ class ChatScreen(Screen):
             self.notify("Chat deleted")
 
     def action_regenerate(self) -> None:
+        if getattr(self, "_active_pane", "main") == "side":
+            self.notify("Regenerate applies to the main chat, not the subagent side chat.", severity="warning")
+            return
         if self._gen.get("main", False):
             self.notify("Still generating — Esc to stop", severity="warning")
             return
@@ -1568,6 +1575,9 @@ class ChatScreen(Screen):
         self._generate()
 
     def action_edit_last(self) -> None:
+        if getattr(self, "_active_pane", "main") == "side":
+            self.notify("Edit-last applies to the main chat, not the subagent side chat.", severity="warning")
+            return
         if self._gen.get("main", False) or not self.chat:
             return
         idx = next((i for i in range(len(self.chat.messages) - 1, -1, -1)
@@ -1698,10 +1708,16 @@ class ChatScreen(Screen):
 
     @work
     async def _generate(self) -> None:
-        if self.chat and (self.chat.web_search or self.chat.tools or self._fs_root()):
-            await self._generate_tools()
-        else:
-            await self._generate_stream()
+        try:
+            if self.chat and (self.chat.web_search or self.chat.tools or self._fs_root()):
+                await self._generate_tools()
+            else:
+                await self._generate_stream()
+        except Exception as exc:  # noqa: BLE001 — a worker error must not wedge the UI
+            self.notify(f"Generation failed: {exc}", severity="error", timeout=8)
+        finally:
+            # always clear the per-pane flag, so the Send button can never get stuck on "Stop"
+            self._set_generating("main", False)
 
     # --- subagents (side chat) -------------------------------------------
 
