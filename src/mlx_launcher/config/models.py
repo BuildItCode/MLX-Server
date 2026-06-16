@@ -8,7 +8,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-Engine = Literal["mlx-lm", "mlx-vlm", "vllm-mlx"]
+Engine = Literal["mlx-lm", "mlx-vlm", "vllm-mlx", "llama-cpp"]
 
 
 def _new_id() -> str:
@@ -62,6 +62,17 @@ class ServerConfig(BaseModel):
     continuous_batching: bool = True         # --continuous-batching (vLLM's batched scheduler)
     tool_call_parser: Optional[str] = None   # --tool-call-parser (default "auto"); enables native tools
     reasoning_parser: Optional[str] = None   # --reasoning-parser (e.g. gpt_oss/harmony/qwen3)
+
+    # llama.cpp ONLY (`llama-server`). GGUF models with native flags. (continuous_batching
+    # above is reused — llama.cpp defaults it on, so we only emit --no-cont-batching to disable.)
+    ctx: Optional[int] = Field(None, ge=1)            # -c: prompt context size (blank = from the model)
+    n_gpu_layers: Optional[int] = Field(None, ge=0)   # -ngl: layers offloaded to GPU
+    n_threads: Optional[int] = Field(None, ge=1)      # -t: CPU threads
+    flash_attn: bool = False                          # --flash-attn on
+    cache_type_k: Optional[str] = None                # --cache-type-k (f16, q8_0, q4_0, …)
+    cache_type_v: Optional[str] = None                # --cache-type-v
+    parallel: Optional[int] = Field(None, ge=1)       # --parallel: concurrent server slots
+    jinja: bool = False                               # --jinja: enable the Jinja chat-template parser
 
     # Misc server flags
     trust_remote_code: bool = False

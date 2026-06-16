@@ -38,9 +38,9 @@ from textual.widgets import (
     TextArea,
 )
 
-from ..chat import capabilities, fs_tools, mcp_client, prompted_tools, skills, store
+from ..chat import capabilities, fs_tools, knowledge, mcp_client, prompted_tools, skills, store
 from ..chat import tools as chat_tools
-from ..chat.blocks import split_blocks
+from ..chat.blocks import linkify_urls, split_blocks
 from ..chat.client import (
     DEFAULT_MAX_TOKENS,
     ChatClient,
@@ -827,7 +827,13 @@ class ChatScreen(Screen):
             return None
         model_max = capabilities.context_window(self.chat.model)
         cfg = self._server_by_id(self.chat.server_id) if self.chat.server_id else None
-        setting = cfg.max_kv_size if (cfg and getattr(cfg, "engine", None) in ("mlx-vlm", "vllm-mlx")) else None
+        engine = getattr(cfg, "engine", None) if cfg else None
+        if engine in ("mlx-vlm", "vllm-mlx"):
+            setting = cfg.max_kv_size  # the configured KV-cache (context) cap
+        elif engine == "llama-cpp":
+            setting = cfg.ctx          # llama-server's -c context size
+        else:
+            setting = None
         if setting and model_max:
             return min(setting, model_max)
         return setting or model_max
@@ -879,7 +885,8 @@ class ChatScreen(Screen):
             if block[0] == "code":
                 widgets.append(CodeBlock(block[2], block[1]))
             elif block[1].strip():
-                widgets.append(Static(RichMarkdown(block[1]), classes="msg-body"))
+                # linkify_urls makes bare URLs clickable; markdown links already are (on_click)
+                widgets.append(Static(RichMarkdown(linkify_urls(block[1])), classes="msg-body"))
         return widgets or [Static("[dim](no content)[/]", classes="msg-body")]
 
     @staticmethod
@@ -1107,6 +1114,12 @@ class ChatScreen(Screen):
         self._persist()
 
     def on_click(self, event: events.Click) -> None:
+        # a click on a rendered link (markdown link or a linkified bare URL) → open it
+        style = getattr(event, "style", None)
+        link = getattr(style, "link", None) if style else None
+        if link:
+            self.app.open_url(link)
+            return
         wid = getattr(event.widget, "id", None)
         if wid == "chip-connectors":  # a plain Static, not a toggle → open the popup
             self.app.push_screen(ConnectorsModal(self.data))
@@ -1531,6 +1544,9 @@ class ChatScreen(Screen):
         parts = [p for p in (skills.instructions_for(sid) for sid in sub.skill_ids) if p]
         if sub.system_prompt.strip():
             parts.append(sub.system_prompt.strip())
+        kb = knowledge.load_knowledge(list(getattr(sub, "knowledge_paths", []) or []))
+        if kb:  # uploaded docs — always in the subagent's context
+            parts.append(kb)
         return "\n\n---\n\n".join(parts)
 
     def _side_openai_messages(self, sub: Subagent) -> list[dict]:

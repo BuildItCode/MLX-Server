@@ -137,6 +137,12 @@ class MlxLauncherApp(App):
     #sa-prompt { height: 8; border: round $panel; }
     #sa-mcp, #sa-skills { height: auto; }
     .chip-row { height: 1; }
+    #sa-kb-add { min-width: 8; margin: 0 0 0 1; }
+    #sa-kb-list { height: auto; padding: 0 0 1 0; }
+    .kb-row { height: 1; align-vertical: middle; }
+    .kb-path { width: 1fr; color: $text-muted; }
+    .kb-del { min-width: 5; height: 1; border: none; background: $panel; color: $text-muted; }
+    .kb-del:hover { background: $primary; color: $background; }
     #subagent-buttons { height: auto; padding: 1 0; }
     #subagent-buttons Button { margin: 0 1 0 0; }
     #mcp-list { height: 1fr; border: round $panel; }

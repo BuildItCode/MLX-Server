@@ -1,19 +1,23 @@
 # MLX Server Launcher (MLXS)
 
-A Claude-Code-styled terminal app (TUI) to launch and manage local
-[`mlx_lm.server`](https://github.com/ml-explore/mlx-lm) (text LLMs) and
-[`mlx_vlm.server`](https://github.com/Blaizzy/mlx-vlm) (vision-language models)
-instances on Apple Silicon.
+A Claude-Code-styled terminal app (TUI) to launch and manage local model servers — then chat
+with them or wire them into Xcode 27. It drives four interchangeable backends:
+[**mlx-lm**](https://github.com/ml-explore/mlx-lm) (text) and
+[**mlx-vlm**](https://github.com/Blaizzy/mlx-vlm) (vision) on Apple Silicon,
+**vllm-mlx** (vLLM-style MLX), and [**llama.cpp**](https://github.com/ggml-org/llama.cpp)
+(`llama-server`, GGUF models) on **macOS, Linux, or Windows**.
 
 <p align="center">
   <img src="preview.png" alt="MLXS chat UI — projects/chats sidebar, skill and server pickers, context bar, and plan/reason/web/tools toggles" width="820">
 </p>
 
-- **Pick the engine** per profile: **mlx-lm** for text LLMs, **mlx-vlm** for
-  vision-language models. The launcher emits each engine's correct flags (and routes
-  vlm-only tuning like `--kv-bits` / `--max-kv-size` / `--enable-thinking` through the
-  Custom box).
-- **Drag & drop** a model folder onto the terminal (or paste a HuggingFace repo id).
+- **Pick the engine** per profile: **mlx-lm** (text), **mlx-vlm** (vision-language),
+  **vllm-mlx** (vLLM-style: continuous batching, KV-quant, native tools), or **llama.cpp**
+  (GGUF; runs on any platform). The launcher builds each engine's correct command line and
+  gates the UI to the flags that engine actually accepts.
+- **Drag & drop** a model folder onto the terminal (or paste a HuggingFace repo id). For
+  **llama.cpp**, point at a `.gguf` file, its model folder (the right `.gguf` is picked
+  automatically), or an HF repo — and a sibling vision projector (`mmproj`) loads on its own.
 - Tweak options (temperature, max-tokens, top-p/k, prompt cache, …) plus a free-form
   **custom params** box for anything else (e.g. quantized-KV-cache flags on servers that
   support them).
@@ -24,7 +28,8 @@ instances on Apple Silicon.
 - **Chat** with a running server in a built-in Claude-style UI (press `c`): projects +
   chats sidebar (create/delete with confirmation), streaming replies that render
   **Markdown with syntax-highlighted, copyable code / JSON blocks**, a thinking panel for
-  reasoning models, a tok/s footer, **drag-and-drop file attachments** (images for vision
+  reasoning models (with a per-chat **reasoning-effort** control), a tok/s footer,
+  **drag-and-drop file attachments** (images for vision
   models, text for any), a multiline prompt (Enter sends · Shift+Enter newline),
   regenerate / edit-last / export-to-Markdown, and a live **theme picker** (Ctrl+T).
 - **Tool use in chat** (toggle *tools* in the chat): the model can call a built-in
@@ -32,6 +37,9 @@ instances on Apple Silicon.
   (stdio or SSE) — manage them with `m` on the dashboard or Ctrl+G in chat. Tool calling is
   native-first with a prompted-protocol fallback, so it works across models (Qwen, Gemma,
   Nemotron, GPT-OSS, MiniMax, Step, …).
+- **Subagents**: define named specialist agents (own model + system prompt + web/MCP/skills +
+  an uploaded **knowledge base** of docs/PDFs that's always in their context) and open one as a
+  50/50 **side chat** beside the main model — message either pane.
 - **Code in a folder**: set a project's **working directory** (`+ Project` / Ctrl+E) and the
   model gets file tools — `read` / `write` / `edit` / `delete` / `run_command` — scoped to
   that folder (paths can't escape it), with an **approve / deny prompt** before anything
@@ -42,37 +50,43 @@ instances on Apple Silicon.
   instead of taking action.
 - **Context bar**: a live token-usage meter showing how much of the model's context window the
   conversation uses.
-- **Dependency self-check**: detects missing `mlx_lm.server` / `mlx_vlm.server` and offers
-  to install either (`p` on the dashboard).
+- **Dependency self-check**: detects which engine binaries are on your `PATH`
+  (`mlx_lm.server`, `mlx_vlm.server`, `vllm-mlx`, `llama-server`) and offers to install the
+  ones you're missing (`p` on the dashboard).
 - **Global install**: run it from anywhere like `claude`.
 
 ## Quick start
 
 ```sh
-./run.sh
+./run.sh                 # macOS / Linux
+.\run-windows.ps1        # Windows (PowerShell)
 ```
 
 First run creates a `.venv` and installs the app's pure-Python deps (Textual, httpx,
-agent-client-protocol, …). It does **not** install the model runtimes itself — the app
-detects your existing `mlx_lm.server` / `mlx_vlm.server` on PATH, or offers to install
-either for you.
+agent-client-protocol, …). It does **not** install the model runtimes — the app detects which
+engine binaries are on your `PATH` and offers to install the ones you're missing.
 
 ## Install globally
 
 ```sh
-./install.sh        # installs pipx via Homebrew, then exposes mlxs globally
-mlxs                # then launch from anywhere
+./install.sh                                                     # macOS
+./install-linux.sh                                              # Linux
+powershell -ExecutionPolicy Bypass -File .\install-windows.ps1   # Windows
+mlxs                                                            # then launch from anywhere
 ```
 
-On macOS the installer uses **Homebrew** (`brew install pipx`) for a clean, isolated global
-install. If you don't have Homebrew, it falls back to a local `.venv` + symlinks in
-`~/.local/bin` (no Homebrew required, but you'll want that dir on your `PATH`).
+Each script installs the launcher (pipx if available, else a local `.venv` + `~/.local/bin`
+symlinks) and exposes the `mlxs` command. The **Linux** and **Windows** scripts also fetch a
+prebuilt **`llama-server`** from the llama.cpp releases — MLX is Apple-Silicon-only, so
+llama.cpp is the engine on those platforms.
 
 ## Requirements
 
-- macOS on Apple Silicon, Python 3.10–3.14.
-- [**Homebrew**](https://brew.sh) — recommended. It's the easiest way to get Python on a Mac,
-  and `./install.sh` uses it to set up the global `mlxs` command (`brew install pipx`).
-- `mlx-lm` (provides `mlx_lm.server`, for text LLMs) and/or `mlx-vlm` (provides
-  `mlx_vlm.server`, for vision-language models). Install whichever you need — the app can
-  install either for you.
+- **Apple Silicon (macOS)** for the MLX engines (mlx-lm, mlx-vlm, vllm-mlx); **macOS, Linux,
+  or Windows** for the llama.cpp engine. Python 3.10–3.14.
+- A model runtime for whichever engine you use:
+  - **mlx-lm / mlx-vlm / vllm-mlx** — installed via `uv tool` or the in-app setup (`p`).
+  - **llama.cpp** (`llama-server`) — `brew install llama.cpp` on macOS; the Linux/Windows
+    install scripts fetch a prebuilt binary for you.
+- [**Homebrew**](https://brew.sh) is recommended on macOS — the easiest way to get Python, and
+  `./install.sh` uses it for a clean global install.

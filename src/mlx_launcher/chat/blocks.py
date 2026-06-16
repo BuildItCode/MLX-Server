@@ -8,6 +8,27 @@ import re
 _OPEN = re.compile(r"^\s*```([\w+.-]*)\s*$")
 _CLOSE = re.compile(r"^\s*```\s*$")
 
+_INLINE_CODE = re.compile(r"`[^`\n]*`")
+# a bare http(s) URL not already inside link syntax (`[..](..)`, `<..>`, `[..]`),
+# excluding trailing sentence punctuation
+_BARE_URL = re.compile(r"""(?<![\[(<])\bhttps?://[^\s<>()\[\]`"']*[^\s<>()\[\]`"'.,;:!?]""")
+
+
+def linkify_urls(text: str) -> str:
+    """Wrap bare http(s) URLs in Markdown link syntax so they render as clickable links
+    (Rich Markdown only links `[text](url)`, not the bare URLs LLMs commonly emit). Leaves
+    URLs already inside link/autolink syntax and inside inline-code spans untouched."""
+    def sub(s: str) -> str:
+        return _BARE_URL.sub(lambda m: f"[{m.group(0)}]({m.group(0)})", s)
+
+    out, pos = [], 0
+    for code in _INLINE_CODE.finditer(text):  # skip inline-code spans verbatim
+        out.append(sub(text[pos:code.start()]))
+        out.append(code.group(0))
+        pos = code.end()
+    out.append(sub(text[pos:]))
+    return "".join(out)
+
 
 def split_blocks(text: str) -> list[tuple]:
     """Return a list of ('prose', text) and ('code', lang, code) tuples."""

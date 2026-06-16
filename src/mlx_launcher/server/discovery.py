@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import glob
+import os
+import re
 import shutil
 import socket
 from typing import Optional
@@ -14,6 +17,7 @@ SERVER_BINARIES: dict[str, str] = {
     "mlx-lm": "mlx_lm.server",
     "mlx-vlm": "mlx_vlm.server",
     "vllm-mlx": "vllm-mlx",
+    "llama-cpp": "llama-server",  # llama.cpp's OpenAI-compatible server (brew install llama.cpp)
 }
 SERVER_BINARY = SERVER_BINARIES["mlx-lm"]  # back-compat default
 
@@ -31,6 +35,37 @@ def find_server_binary(engine: str = "mlx-lm") -> Optional[str]:
     different environment than this app's venv.
     """
     return shutil.which(binary_name(engine))
+
+
+def resolve_gguf(model: str) -> str:
+    """Resolve a llama.cpp model reference to the actual .gguf FILE to pass to `-m`.
+
+    LM Studio / HuggingFace store a GGUF model as a DIRECTORY of one or more .gguf files
+    (just like MLX models are folders), but `llama-server -m` needs a specific file — the
+    first shard of a sharded model pulls in the rest. Returns `model` unchanged when it's
+    already a file, an HF repo id (`org/repo`), or no .gguf can be found. The vision
+    projector (`mmproj-*.gguf`) is skipped here — it's loaded via `--mmproj` (find_mmproj)."""
+    path = os.path.expanduser(model or "")
+    if not os.path.isdir(path):
+        return model
+    ggufs = (sorted(glob.glob(os.path.join(path, "*.gguf")))
+             or sorted(glob.glob(os.path.join(path, "*", "*.gguf"))))
+    main = [g for g in ggufs if "mmproj" not in os.path.basename(g).lower()]
+    if not main:
+        return model
+    shards = [g for g in main if re.search(r"-0*1-of-\d+\.gguf$", os.path.basename(g))]
+    return (shards or main)[0]
+
+
+def find_mmproj(model: str) -> Optional[str]:
+    """The multimodal projector (`mmproj-*.gguf`) sitting beside a llama.cpp model, if any
+    — passed to `llama-server --mmproj` so vision/omni models can actually see images."""
+    path = os.path.expanduser(model or "")
+    folder = path if os.path.isdir(path) else os.path.dirname(path)
+    if not os.path.isdir(folder):
+        return None
+    hits = sorted(glob.glob(os.path.join(folder, "*mmproj*.gguf")))
+    return hits[0] if hits else None
 
 
 def is_port_free(host: str, port: int) -> bool:

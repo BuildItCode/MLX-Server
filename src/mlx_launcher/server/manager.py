@@ -14,6 +14,8 @@ import itertools
 import os
 import re
 import signal
+import subprocess
+import sys
 from collections import deque
 from enum import Enum
 from typing import Callable, Optional
@@ -42,6 +44,14 @@ class PortInUse(Exception):
 
 LogCb = Callable[[str, str], None]  # (stream_name, line)
 StatusCb = Callable[[ServerStatus, str], None]  # (status, message)
+
+
+def _spawn_kwargs() -> dict:
+    """Subprocess kwargs that put the server in its own process group, so we can kill the
+    whole tree on stop. POSIX uses a new session; Windows a new process group."""
+    if sys.platform == "win32":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
 
 
 class ServerManager:
@@ -114,7 +124,20 @@ class ServerManager:
             self._set_status(ServerStatus.ERROR, msg)
             raise PortInUse(msg)
 
-        argv = build_argv(self.cfg, mlx)
+        launch_cfg = self.cfg
+        if launch_cfg.engine == "llama-cpp":
+            # the model field may be a folder (LM Studio / HF layout) → resolve to the .gguf
+            resolved = discovery.resolve_gguf(launch_cfg.model)
+            if resolved != launch_cfg.model:
+                self._emit_log("meta", f"resolved GGUF → {resolved}")
+            launch_cfg = launch_cfg.model_copy(update={"model": resolved})
+        argv = build_argv(launch_cfg, mlx)
+        # vision/omni models: auto-load the sibling projector unless one is already set
+        if launch_cfg.engine == "llama-cpp" and "--mmproj" not in argv:
+            mmproj = discovery.find_mmproj(launch_cfg.model)
+            if mmproj:
+                argv += ["--mmproj", mmproj]
+                self._emit_log("meta", f"vision projector → {mmproj}")
         self._emit_log("meta", "$ " + " ".join(argv))
         self._set_status(ServerStatus.STARTING, f"launching {binary} …")
 
@@ -122,8 +145,8 @@ class ServerManager:
             *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,  # own process group → clean group kill
             env=os.environ.copy(),
+            **_spawn_kwargs(),  # own process group → clean tree kill (POSIX + Windows)
         )
         self._stopping = False
         self._tasks = [
@@ -189,6 +212,9 @@ class ServerManager:
             )
         if "trust_remote_code" in text.lower():
             return "model needs trust-remote-code — enable it on the editor's Advanced tab"
+        if self.cfg.engine == "llama-cpp" and re.search(
+                r"(failed to load model|error loading model|llama_model_load|gguf)", text, re.I):
+            return "couldn't load the GGUF — check the model path/quant and that llama-server supports this architecture"
         if re.search(r"(No such file or directory|does not exist|is not a directory|Repository Not Found)", text, re.I):
             return "could not load the model — check the model path/repo id"
         if "Address already in use" in text or "EADDRINUSE" in text:
@@ -202,11 +228,11 @@ class ServerManager:
             self._set_status(ServerStatus.STOPPED, "server stopped")
             self._cancel_tasks()
             return
-        self._signal_group(proc, signal.SIGTERM)
+        self._terminate_proc(proc)
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
         except asyncio.TimeoutError:
-            self._signal_group(proc, signal.SIGKILL)
+            self._kill_proc(proc)
             try:
                 await asyncio.wait_for(proc.wait(), timeout=3.0)
             except asyncio.TimeoutError:
@@ -214,11 +240,11 @@ class ServerManager:
         self._cancel_tasks()
 
     def terminate(self) -> None:
-        """Best-effort synchronous SIGTERM, for app shutdown (no await)."""
+        """Best-effort synchronous graceful stop, for app shutdown (no await)."""
         self._stopping = True
         proc = self.proc
         if proc is not None and proc.returncode is None:
-            self._signal_group(proc, signal.SIGTERM)
+            self._terminate_proc(proc)
 
     def is_alive(self) -> bool:
         """Liveness checked via the OS — works even when the event loop is no longer
@@ -226,6 +252,9 @@ class ServerManager:
         proc = self.proc
         if proc is None:
             return False
+        if sys.platform == "win32":
+            # os.kill(pid, 0) *terminates* the process on Windows — never probe with it.
+            return proc.returncode is None
         try:
             os.kill(proc.pid, 0)
             return True
@@ -235,17 +264,34 @@ class ServerManager:
             return True
 
     def kill_now(self) -> None:
-        """Synchronous SIGKILL of the process group — last-resort shutdown."""
+        """Synchronous force-kill — last-resort shutdown."""
         self._stopping = True
         proc = self.proc
         if proc is not None:
-            self._signal_group(proc, signal.SIGKILL)
+            self._kill_proc(proc)
 
     @staticmethod
-    def _signal_group(proc: asyncio.subprocess.Process, sig: int) -> None:
+    def _terminate_proc(proc: asyncio.subprocess.Process) -> None:
+        """Graceful stop of the server's process group: SIGTERM the POSIX group, or
+        `terminate()` on Windows (no POSIX signals / process groups there)."""
         try:
-            os.killpg(os.getpgid(proc.pid), sig)
-        except (ProcessLookupError, PermissionError):
+            if sys.platform == "win32":
+                proc.terminate()
+            else:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+    @staticmethod
+    def _kill_proc(proc: asyncio.subprocess.Process) -> None:
+        """Force-kill the whole tree: SIGKILL the POSIX group, or `taskkill /T` on Windows."""
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               capture_output=True, check=False)
+            else:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
             pass
 
     def _cancel_tasks(self) -> None:

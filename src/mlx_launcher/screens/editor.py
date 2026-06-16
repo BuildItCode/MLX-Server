@@ -33,6 +33,7 @@ from textual.widgets import (
 
 from ..config import flags, store
 from ..config.models import ServerConfig
+from ..server import discovery
 from ..widgets.path_input import DropPathInput, PathInput, path_hint, resolve_path, sanitize_drag
 
 _LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
@@ -41,6 +42,7 @@ _ENGINE_HINTS = {
     "mlx-lm": "Text LLMs via mlx_lm.server.",
     "mlx-vlm": "Vision-language (and text) models via mlx_vlm.server — supports a quantized KV cache.",
     "vllm-mlx": "vLLM-style MLX server (vllm-mlx serve): continuous batching, prefix cache, native tools, 4/8-bit KV cache.",
+    "llama-cpp": "GGUF via llama.cpp (llama-server) — a .gguf file, its model folder (LM Studio dir), or an HF repo (org/repo:quant). A sibling vision projector (mmproj) loads automatically.",
 }
 
 # Per-engine guidance for the KV-cache row.
@@ -48,6 +50,7 @@ _KV_HINTS = {
     "mlx-lm": "mlx-lm has no KV-cache quantization — switch to mlx-vlm or vllm-mlx to shrink context memory.",
     "mlx-vlm": "KV bits: 8, 4, or 3.5. Turboquant available. Max KV size caps the context (tokens).",
     "vllm-mlx": "KV bits: 4 or 8. Max KV size caps the context (tokens). Turboquant is mlx-vlm only.",
+    "llama-cpp": "llama.cpp uses --cache-type-k/v (f16, q8_0, q4_0, …) below, not KV bits. Context via the -c field.",
 }
 
 # Manual-section groups → the engines that use them; the rest are hidden so a
@@ -60,6 +63,7 @@ _MANUAL_GROUP_ENGINES: dict[str, set[str]] = {
     "grp-kv-extra": {"mlx-vlm", "vllm-mlx"},     # KV group size
     "grp-kv-mlxvlm": {"mlx-vlm"},                # mlx-vlm-only KV start index
     "grp-vllm": {"vllm-mlx"},                    # continuous batching, parsers
+    "grp-llamacpp": {"llama-cpp"},               # GPU layers, threads, ctx, KV cache types
 }
 
 
@@ -83,6 +87,7 @@ class EditorScreen(Screen):
                     ("mlx-lm  ·  text LLMs", "mlx-lm"),
                     ("mlx-vlm  ·  vision-language models", "mlx-vlm"),
                     ("vllm-mlx  ·  vLLM-style (text + vision, KV-quant)", "vllm-mlx"),
+                    ("llama-cpp  ·  GGUF models (llama.cpp)", "llama-cpp"),
                 ],
                 value="mlx-lm",
                 allow_blank=False,
@@ -222,6 +227,36 @@ class EditorScreen(Screen):
                         with Vertical(classes="col"):
                             yield Label("Reasoning parser")
                             yield Input(id="reasoning_parser", placeholder="gpt_oss | harmony | qwen3")
+
+                with Vertical(id="grp-llamacpp"):
+                    yield Label("llama.cpp options", classes="hint")
+                    with Horizontal(classes="row"):
+                        with Vertical(classes="col"):
+                            yield Label("GPU layers (-ngl)")
+                            yield Input(id="n_gpu_layers", placeholder="all · e.g. 99")
+                        with Vertical(classes="col"):
+                            yield Label("Threads (-t)")
+                            yield Input(id="n_threads", placeholder="auto")
+                    with Horizontal(classes="row"):
+                        with Vertical(classes="col"):
+                            yield Label("Context size (-c)")
+                            yield Input(id="ctx", placeholder="from model")
+                        with Vertical(classes="col"):
+                            yield Label("Parallel slots")
+                            yield Input(id="parallel", placeholder="1")
+                    with Horizontal(classes="row"):
+                        with Vertical(classes="col"):
+                            yield Label("KV cache type K")
+                            yield Input(id="cache_type_k", placeholder="f16 · q8_0 · q4_0")
+                        with Vertical(classes="col"):
+                            yield Label("KV cache type V")
+                            yield Input(id="cache_type_v", placeholder="f16 · q8_0 · q4_0")
+                    with Horizontal(classes="switch-row"):
+                        yield Switch(id="flash_attn")
+                        yield Label("flash attention")
+                    with Horizontal(classes="switch-row"):
+                        yield Switch(id="jinja")
+                        yield Label("Jinja chat template (--jinja)")
         with Horizontal(id="buttons"):
             yield Button("Save", id="save", variant="primary")
             yield Button("Save & Launch", id="save_launch", variant="success")
@@ -245,10 +280,10 @@ class EditorScreen(Screen):
         that don't apply, and update the KV hint."""
         engine = str(self.query_one("#engine", Select).value)
         # visible KV/options — disabled in place (still shown, so it's clear they exist)
-        self.query_one("#kv_bits", Input).disabled = engine == "mlx-lm"
-        self.query_one("#max_kv_size", Input).disabled = engine == "mlx-lm"
+        self.query_one("#kv_bits", Input).disabled = engine in ("mlx-lm", "llama-cpp")
+        self.query_one("#max_kv_size", Input).disabled = engine in ("mlx-lm", "llama-cpp")
         self.query_one("#turboquant", Switch).disabled = engine != "mlx-vlm"
-        self.query_one("#draft_model", Input).disabled = engine == "vllm-mlx"
+        self.query_one("#draft_model", Input).disabled = engine in ("vllm-mlx", "llama-cpp")
         self.query_one("#kv-hint", Label).update(_KV_HINTS.get(engine, ""))
         # manual groups — hidden when irrelevant to the engine
         for gid, engines in _MANUAL_GROUP_ENGINES.items():
@@ -288,6 +323,12 @@ class EditorScreen(Screen):
         text("prefill_step_size", s.prefill_step_size)
         text("mlx_server_path", s.mlx_server_path)
         text("custom_params", s.custom_params)
+        text("ctx", s.ctx)
+        text("n_gpu_layers", s.n_gpu_layers)
+        text("n_threads", s.n_threads)
+        text("parallel", s.parallel)
+        text("cache_type_k", s.cache_type_k)
+        text("cache_type_v", s.cache_type_v)
         self.query_one("#engine", Select).value = s.engine
         self.query_one("#log_level", Select).value = s.log_level
         self.query_one("#turboquant", Switch).value = s.kv_quant_scheme == "turboquant"
@@ -295,6 +336,8 @@ class EditorScreen(Screen):
         self.query_one("#use_default_chat_template", Switch).value = s.use_default_chat_template
         self.query_one("#pipeline", Switch).value = s.pipeline
         self.query_one("#continuous_batching", Switch).value = s.continuous_batching
+        self.query_one("#flash_attn", Switch).value = s.flash_attn
+        self.query_one("#jinja", Switch).value = s.jinja
 
     def _collect(self) -> ServerConfig:
         def s(i: str) -> str:
@@ -369,6 +412,14 @@ class EditorScreen(Screen):
             continuous_batching=sw("continuous_batching"),
             tool_call_parser=opt_str("tool_call_parser"),
             reasoning_parser=opt_str("reasoning_parser"),
+            ctx=opt_int("ctx"),
+            n_gpu_layers=opt_int("n_gpu_layers"),
+            n_threads=opt_int("n_threads"),
+            parallel=opt_int("parallel"),
+            cache_type_k=opt_str("cache_type_k"),
+            cache_type_v=opt_str("cache_type_v"),
+            flash_attn=sw("flash_attn"),
+            jinja=sw("jinja"),
             log_level=self.query_one("#log_level", Select).value,
             draft_model=opt_str("draft_model"),
             num_draft_tokens=opt_int("num_draft_tokens"),
@@ -446,6 +497,8 @@ class EditorScreen(Screen):
             cfg = self._collect()
         except Exception:
             return
+        if cfg.engine == "llama-cpp":  # show the resolved .gguf file, as the launch will use it
+            cfg = cfg.model_copy(update={"model": discovery.resolve_gguf(cfg.model)})
         self.query_one("#cmd-preview", Label).update(Content(f"$ {flags.preview_command(cfg)}"))
 
     @on(Button.Pressed, "#save")

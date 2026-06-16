@@ -125,3 +125,40 @@ def test_preview_uses_engine_binary():
     assert preview_command(ServerConfig(model="/m")).startswith("mlx_lm.server")
     assert preview_command(ServerConfig(engine="mlx-vlm", model="/m")).startswith("mlx_vlm.server")
     assert preview_command(ServerConfig(engine="vllm-mlx", model="/m")).startswith("vllm-mlx serve /m")
+    assert preview_command(ServerConfig(engine="llama-cpp", model="/m.gguf")).startswith("llama-server -m /m.gguf")
+
+
+def test_llama_cpp_builds_native_flags():
+    c = ServerConfig(
+        engine="llama-cpp", model="/models/m.gguf", port=8081, ctx=8192, n_gpu_layers=99,
+        n_threads=8, max_tokens=4096, temp=0.7, cache_type_k="q8_0", cache_type_v="q8_0",
+        parallel=2, flash_attn=True, jinja=True, continuous_batching=False,
+    )
+    a = build_args(c)
+    assert a[a.index("-m") + 1] == "/models/m.gguf"
+    assert a[a.index("--port") + 1] == "8081"
+    assert a[a.index("-c") + 1] == "8192"
+    assert a[a.index("-ngl") + 1] == "99"
+    assert a[a.index("-t") + 1] == "8"
+    assert a[a.index("--n-predict") + 1] == "4096"        # max_tokens → --n-predict
+    assert a[a.index("--cache-type-k") + 1] == "q8_0"
+    assert a[a.index("--flash-attn") + 1] == "on"          # a VALUE, not a bare flag
+    assert "--no-cont-batching" in a                       # continuous_batching=False (default on)
+    assert "--jinja" in a
+
+
+def test_llama_cpp_hf_repo_vs_local_path():
+    assert build_args(ServerConfig(engine="llama-cpp", model="org/Repo-GGUF:Q4_K_M"))[:2] == \
+        ["-hf", "org/Repo-GGUF:Q4_K_M"]                     # HF repo → download
+    assert build_args(ServerConfig(engine="llama-cpp", model="/models/m.gguf"))[:2] == \
+        ["-m", "/models/m.gguf"]                            # absolute path → local file
+    assert build_args(ServerConfig(engine="llama-cpp", model="./local.gguf"))[:2] == \
+        ["-m", "./local.gguf"]                             # relative .gguf → local file
+
+
+def test_llama_cpp_omits_mlx_only_flags():
+    a = build_args(ServerConfig(engine="llama-cpp", model="/m.gguf", kv_bits="4",
+                                pipeline=True, prompt_cache_size=10))
+    assert "--kv-bits" not in a and "--pipeline" not in a and "--prompt-cache-size" not in a
+    # continuous_batching defaults on → no flag emitted
+    assert "--no-cont-batching" not in build_args(ServerConfig(engine="llama-cpp", model="/m.gguf"))

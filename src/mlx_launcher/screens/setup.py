@@ -26,6 +26,7 @@ class SetupScreen(Screen):
                 yield Button("Install mlx-lm", id="install_mlx", variant="primary")
                 yield Button("Install mlx-vlm", id="install_vlm", variant="primary")
                 yield Button("Install vllm-mlx", id="install_vllm", variant="primary")
+                yield Button("Install llama.cpp", id="install_llama", variant="primary")
                 yield Button("Locate binary", id="locate")
                 yield Button("Install globally", id="install_global", variant="success")
                 yield Button("Back", id="back")
@@ -39,7 +40,8 @@ class SetupScreen(Screen):
     def _refresh_status(self) -> None:
         located = self.app.config.settings.mlx_server_path
         lines = []
-        for engine, binary in (("mlx-lm", "mlx_lm.server"), ("mlx-vlm", "mlx_vlm.server"), ("vllm-mlx", "vllm-mlx")):
+        for engine, binary in (("mlx-lm", "mlx_lm.server"), ("mlx-vlm", "mlx_vlm.server"),
+                               ("vllm-mlx", "vllm-mlx"), ("llama-cpp", "llama-server")):
             path = bootstrap.find_mlx_server(engine)
             if path:
                 lines.append(f"[#7fb069]✓ {binary} found[/]  [dim]{escape(path)}[/]")
@@ -69,6 +71,16 @@ class SetupScreen(Screen):
     @on(Button.Pressed, "#install_vllm")
     def _install_vllm(self) -> None:
         self.run_worker(self._run(bootstrap.engine_install_argv("vllm-mlx")), exclusive=True)
+
+    @on(Button.Pressed, "#install_llama")
+    def _install_llama(self) -> None:
+        argv = bootstrap.llama_cpp_install_argv()
+        if argv is None:
+            self.notify("Install llama.cpp via your platform's script (install-linux.sh / "
+                        "install-windows.ps1) or download a release from github.com/ggml-org/llama.cpp.",
+                        severity="warning")
+            return
+        self.run_worker(self._run(argv), exclusive=True)
 
     @on(Button.Pressed, "#install_global")
     def _install_global(self) -> None:

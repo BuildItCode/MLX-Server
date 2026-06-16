@@ -449,11 +449,13 @@ def test_editor_gates_fields_by_engine():
         "mlx-lm": {"grp-sampling", "grp-shared-adv", "grp-mlxlm-adv"},
         "mlx-vlm": {"grp-shared-adv", "grp-kv-extra", "grp-kv-mlxvlm"},
         "vllm-mlx": {"grp-kv-extra", "grp-vllm"},
+        "llama-cpp": {"grp-llamacpp"},
     }
     disabled = {  # which visible KV/option fields are greyed out per engine
         "mlx-lm": {"kv_bits": True, "max_kv_size": True, "turboquant": True, "draft_model": False},
         "mlx-vlm": {"kv_bits": False, "max_kv_size": False, "turboquant": False, "draft_model": False},
         "vllm-mlx": {"kv_bits": False, "max_kv_size": False, "turboquant": True, "draft_model": True},
+        "llama-cpp": {"kv_bits": True, "max_kv_size": True, "turboquant": True, "draft_model": True},
     }
 
     async def go():
@@ -1455,6 +1457,109 @@ def test_effort_chip_cycles_and_reflects_state():
     cs._cycle_effort(); cs._cycle_effort(); assert cs.chat.reasoning_effort == "high"
     cs._cycle_effort(); assert cs.chat.reasoning_effort is None    # wraps back to auto
     assert chip.label == "effort: auto" and "hidden" not in chip.classes  # shown for gpt-oss
+
+
+def test_linkify_urls_wraps_only_bare_urls():
+    from mlx_launcher.chat.blocks import linkify_urls
+
+    assert linkify_urls("see https://x.com/p here") == "see [https://x.com/p](https://x.com/p) here"
+    assert linkify_urls("[docs](https://x.com)") == "[docs](https://x.com)"               # md link kept
+    assert linkify_urls("[https://x.com](https://x.com)") == "[https://x.com](https://x.com)"  # already linked
+    assert linkify_urls("run `curl https://x.com`") == "run `curl https://x.com`"         # inline code kept
+    assert linkify_urls("go to https://x.com.") == "go to [https://x.com](https://x.com)."  # trailing dot excluded
+    assert linkify_urls("<https://x.com>") == "<https://x.com>"                             # autolink kept
+    assert linkify_urls("no links here") == "no links here"
+
+
+def test_on_click_opens_a_rendered_link(monkeypatch):
+    # clicking text that carries a link style (a markdown link or a linkified bare URL)
+    # opens it in the browser via app.open_url.
+    from mlx_launcher.screens.chat import ChatScreen
+
+    opened = {}
+
+    class FakeApp:
+        def open_url(self, url):
+            opened["url"] = url
+
+    cs = ChatScreen.__new__(ChatScreen)
+    monkeypatch.setattr(ChatScreen, "app", property(lambda self: FakeApp()))
+
+    class Style:
+        link = "https://example.com/x"
+
+    class Ev:
+        widget = None
+        style = Style()
+
+    cs.on_click(Ev())
+    assert opened["url"] == "https://example.com/x"
+
+
+def test_load_knowledge_reads_files_and_folders(tmp_path):
+    from mlx_launcher.chat import knowledge
+
+    (tmp_path / "a.md").write_text("Alpha doc")
+    (tmp_path / "pic.png").write_bytes(b"\x89PNG\x00bytes")          # binary → skipped
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "c.md").write_text("Gamma in folder")
+    (sub / "ignore.bin").write_bytes(b"\x00\x01")                    # non-text in folder → skipped
+
+    out = knowledge.load_knowledge([str(tmp_path / "a.md"), str(tmp_path / "pic.png"), str(sub)])
+    assert out.startswith("# Knowledge base")
+    assert "Alpha doc" in out and "Gamma in folder" in out
+    assert 'name="a.md"' in out and 'name="c.md"' in out
+    assert "bytes" not in out and "ignore.bin" not in out           # binaries excluded
+    assert knowledge.load_knowledge([]) == ""                       # nothing → empty
+    assert knowledge.load_knowledge([str(tmp_path / "missing.md")]) == ""  # absent path → empty
+
+
+def test_load_knowledge_extracts_pdf_text(tmp_path):
+    from mlx_launcher.chat import knowledge
+
+    def make_pdf(text: str) -> bytes:  # a minimal single-page PDF that shows `text`
+        objs = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+            b"/Resources << /Font << /F1 5 0 R >> >> >>",
+        ]
+        stream = b"BT /F1 24 Tf 72 720 Td (" + text.encode() + b") Tj ET"
+        objs.append(b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream")
+        objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+        pdf, offs = b"%PDF-1.4\n", []
+        for i, body in enumerate(objs, 1):
+            offs.append(len(pdf))
+            pdf += str(i).encode() + b" 0 obj\n" + body + b"\nendobj\n"
+        x = len(pdf)
+        pdf += b"xref\n0 " + str(len(objs) + 1).encode() + b"\n0000000000 65535 f \n"
+        for o in offs:
+            pdf += ("%010d 00000 n \n" % o).encode()
+        pdf += (b"trailer\n<< /Size " + str(len(objs) + 1).encode() + b" /Root 1 0 R >>\nstartxref\n"
+                + str(x).encode() + b"\n%%EOF")
+        return pdf
+
+    pdf = tmp_path / "report.pdf"
+    pdf.write_bytes(make_pdf("Quarterly revenue grew 12 percent"))
+    out = knowledge.load_knowledge([str(pdf)])
+    assert "Quarterly revenue grew 12 percent" in out and 'name="report.pdf"' in out
+
+
+def test_subagent_system_injects_knowledge(tmp_path):
+    from mlx_launcher.chat.models import Subagent
+    from mlx_launcher.screens.chat import ChatScreen
+
+    doc = tmp_path / "handbook.md"
+    doc.write_text("Company policy: always be kind.")
+    cs = ChatScreen.__new__(ChatScreen)
+
+    sub = Subagent(name="HR", system_prompt="You are HR.", knowledge_paths=[str(doc)])
+    system = cs._subagent_system(sub)
+    assert "You are HR." in system
+    assert "Company policy: always be kind." in system and "Knowledge base" in system
+    # no knowledge attached → no knowledge block
+    assert "Knowledge base" not in cs._subagent_system(Subagent(name="x", system_prompt="hi"))
 
 
 def test_effort_chip_renders_and_hides_for_non_reasoning_models(tmp_path, monkeypatch):

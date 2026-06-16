@@ -112,10 +112,66 @@ def _vllm_mlx_args(cfg: ServerConfig) -> list[str]:
     return args
 
 
+def _looks_like_hf_repo(model: str) -> bool:
+    """Heuristic (no I/O): a HuggingFace repo id like `org/repo[:quant]` rather than a
+    local GGUF path — has a '/', isn't a filesystem path, and doesn't end in .gguf. Used
+    to choose `-hf` (download) vs `-m` (local file) for llama-server."""
+    return ("/" in model and not model.endswith(".gguf")
+            and not model.startswith(("/", "~", ".")))
+
+
+def _llama_cpp_args(cfg: ServerConfig) -> list[str]:
+    """`llama-server -m <model.gguf> …` — llama.cpp's OpenAI-compatible server. GGUF
+    models, native short flags (verified against `llama-server --help`)."""
+    args: list[str] = []
+    model = cfg.model.strip()
+    if model:
+        args += (["-hf", model] if _looks_like_hf_repo(model) else ["-m", model])
+    if cfg.host:
+        args += ["--host", cfg.host]
+    args += ["--port", str(cfg.port)]
+    if cfg.ctx:
+        args += ["-c", str(cfg.ctx)]
+    if cfg.n_gpu_layers is not None:
+        args += ["-ngl", str(cfg.n_gpu_layers)]
+    if cfg.n_threads:
+        args += ["-t", str(cfg.n_threads)]
+    if cfg.max_tokens:
+        args += ["--n-predict", str(cfg.max_tokens)]
+    if cfg.temp is not None:
+        args += ["--temp", str(cfg.temp)]
+    if cfg.top_p is not None:
+        args += ["--top-p", str(cfg.top_p)]
+    if cfg.top_k is not None:
+        args += ["--top-k", str(cfg.top_k)]
+    if cfg.min_p is not None:
+        args += ["--min-p", str(cfg.min_p)]
+    if cfg.cache_type_k:
+        args += ["--cache-type-k", cfg.cache_type_k]
+    if cfg.cache_type_v:
+        args += ["--cache-type-v", cfg.cache_type_v]
+    if cfg.parallel:
+        args += ["--parallel", str(cfg.parallel)]
+    if cfg.flash_attn:
+        args += ["--flash-attn", "on"]  # help shows [on|off|auto] — not a bare flag
+    if not cfg.continuous_batching:
+        args.append("--no-cont-batching")  # llama.cpp enables continuous batching by default
+    if cfg.jinja:
+        args.append("--jinja")
+    if cfg.chat_template:
+        args += ["--chat-template", cfg.chat_template]
+    custom = cfg.custom_params.strip()
+    if custom:
+        args += shlex.split(custom)
+    return args
+
+
 def build_args(cfg: ServerConfig) -> list[str]:
     """The flags only (without the binary path)."""
     if cfg.engine == "vllm-mlx":
         return _vllm_mlx_args(cfg)
+    if cfg.engine == "llama-cpp":
+        return _llama_cpp_args(cfg)
     value_flags, bool_flags = _tables(cfg.engine)
     args: list[str] = []
     for field, flag in value_flags:
@@ -139,7 +195,7 @@ def build_argv(cfg: ServerConfig, mlx_path: str) -> list[str]:
     return [mlx_path, *build_args(cfg)]
 
 
-_DEFAULT_BINARY = {"mlx-vlm": "mlx_vlm.server", "vllm-mlx": "vllm-mlx"}
+_DEFAULT_BINARY = {"mlx-vlm": "mlx_vlm.server", "vllm-mlx": "vllm-mlx", "llama-cpp": "llama-server"}
 
 
 def preview_command(cfg: ServerConfig, mlx_path: str | None = None) -> str:

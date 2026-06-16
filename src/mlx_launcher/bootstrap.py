@@ -48,6 +48,20 @@ def engine_install_argv(package: str = "mlx-lm") -> list[str]:
     return pip_install_argv(package)
 
 
+def brew_available() -> bool:
+    return shutil.which("brew") is not None
+
+
+def llama_cpp_install_argv() -> Optional[list[str]]:
+    """OS-aware install for llama.cpp's `llama-server` (a native binary, NOT a PyPI
+    package — so this can't use uv/pip). macOS → Homebrew. Other platforms → None: the
+    setup screen then points to install-linux.sh / install-windows.ps1 (which download a
+    prebuilt release), or the user installs it manually."""
+    if sys.platform == "darwin" and brew_available():
+        return ["brew", "install", "llama.cpp"]
+    return None
+
+
 def pip_install_argv(package: str = "mlx-lm") -> list[str]:
     """Install into the *current* interpreter's environment. Fallback only — the
     server script may not land on PATH (see engine_install_argv)."""

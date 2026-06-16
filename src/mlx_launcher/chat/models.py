@@ -102,6 +102,7 @@ class Subagent(BaseModel):
     tools: bool = False  # may call its selected MCP connections
     mcp_server_ids: list[str] = Field(default_factory=list)  # which MCP servers it uses
     skill_ids: list[str] = Field(default_factory=list)  # skills injected into its prompt
+    knowledge_paths: list[str] = Field(default_factory=list)  # docs/folders always in its context
     relay: bool = True  # legacy; kept for back-compat (unused)
     max_tokens: Optional[int] = None  # per-subagent budget; else profile/global default
 

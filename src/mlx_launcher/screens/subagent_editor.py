@@ -4,6 +4,7 @@ Opened from the subagents menu as a side chat."""
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 from textual import on
@@ -11,10 +12,11 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Input, Label, Select, TextArea
+from textual.widgets import Button, Footer, Header, Input, Label, Select, Static, TextArea
 
 from ..chat import skills, store
 from ..chat.models import Subagent
+from ..widgets.path_input import DropPathInput
 from ..widgets.safe_content import plain
 from ..widgets.toggle_chip import ToggleChip
 
@@ -29,6 +31,7 @@ class SubagentEditorScreen(Screen):
         super().__init__()
         self.sub = sub
         self.data = store.load()
+        self._knowledge: list[str] = list(sub.knowledge_paths) if sub else []
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -57,6 +60,11 @@ class SubagentEditorScreen(Screen):
             with Vertical(id="sa-skills"):
                 for s in skills.all_skills():
                     yield ToggleChip(plain(s.name), f"skill:{s.id}", classes="connector-chip")
+            yield Label("Knowledge base — docs always in its context (drag a file/folder onto the field, or paste a path)")
+            with Horizontal(classes="row"):
+                yield DropPathInput(id="sa-kb-path", placeholder="~/docs/handbook.md  or  a folder")
+                yield Button("Add", id="sa-kb-add")
+            yield Vertical(id="sa-kb-list")
             yield Label("Max tokens (optional)")
             yield Input(id="sa-maxtok", placeholder="e.g. 4096")
         with Horizontal(id="subagent-buttons"):
@@ -80,6 +88,7 @@ class SubagentEditorScreen(Screen):
                 if (kind == "mcp" and ident in self.sub.mcp_server_ids) or \
                    (kind == "skill" and ident in self.sub.skill_ids):
                     chip.set_value(True)
+        self._refresh_kb()
         self.query_one("#sa-name", Input).focus()
 
     def _selected(self, kind: str) -> list[str]:
@@ -89,6 +98,51 @@ class SubagentEditorScreen(Screen):
             if k == kind and chip.value:
                 out.append(ident)
         return out
+
+    # --- knowledge base --------------------------------------------------
+
+    def _refresh_kb(self) -> None:
+        box = self.query_one("#sa-kb-list", Vertical)
+        box.remove_children()
+        if not self._knowledge:
+            box.mount(Label(plain("none yet — PDFs, text, markdown, code; folders OK"),
+                            classes="hint"))
+            return
+        for path in self._knowledge:
+            btn = Button("✕", classes="kb-del")
+            btn._kb_path = path  # an id can't hold a path → carry it on the widget
+            box.mount(Horizontal(Static(plain(path), classes="kb-path"), btn, classes="kb-row"))
+
+    def _add_knowledge(self, raw: str) -> None:
+        path = os.path.expanduser((raw or "").strip())
+        if not path:
+            return
+        if not os.path.exists(path):
+            self.notify(f"Not found: {path}", severity="error")
+            return
+        if path not in self._knowledge:
+            self._knowledge.append(path)
+        self.query_one("#sa-kb-path", DropPathInput).value = ""
+        self._refresh_kb()
+
+    @on(Button.Pressed, "#sa-kb-add")
+    def _kb_add_btn(self) -> None:
+        self._add_knowledge(self.query_one("#sa-kb-path", DropPathInput).value)
+
+    @on(Input.Submitted, "#sa-kb-path")
+    def _kb_submit(self) -> None:
+        self._add_knowledge(self.query_one("#sa-kb-path", DropPathInput).value)
+
+    @on(DropPathInput.PathDropped)
+    def _kb_dropped(self, event: DropPathInput.PathDropped) -> None:
+        self._add_knowledge(event.path)
+
+    @on(Button.Pressed, ".kb-del")
+    def _kb_remove(self, event: Button.Pressed) -> None:
+        path = getattr(event.button, "_kb_path", None)
+        if path in self._knowledge:
+            self._knowledge.remove(path)
+            self._refresh_kb()
 
     def _save(self) -> bool:
         name = self.query_one("#sa-name", Input).value.strip()
@@ -116,6 +170,7 @@ class SubagentEditorScreen(Screen):
         sub.tools = self.query_one("#sa-tools", ToggleChip).value
         sub.mcp_server_ids = self._selected("mcp")
         sub.skill_ids = self._selected("skill")
+        sub.knowledge_paths = list(self._knowledge)
         sub.max_tokens = max_tokens
         # Re-read before writing: chats.json is one document (chats/projects/subagents),
         # so saving a stale snapshot here would clobber edits made elsewhere meanwhile.
