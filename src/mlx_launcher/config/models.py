@@ -35,17 +35,18 @@ class ServerConfig(BaseModel):
     model: str = ""  # local path or HuggingFace repo id
     adapter_path: Optional[str] = None
     host: str = "127.0.0.1"
-    port: int = 8080
+    port: int = Field(8080, ge=1, le=65535)
 
-    # Sampling defaults
-    temp: Optional[float] = None
-    top_p: Optional[float] = None
-    top_k: Optional[int] = None
-    min_p: Optional[float] = None
-    max_tokens: Optional[int] = None
+    # Sampling defaults (bounded so a bad value is caught at edit/load time instead of
+    # surfacing as a cryptic engine crash on launch)
+    temp: Optional[float] = Field(None, ge=0.0)
+    top_p: Optional[float] = Field(None, ge=0.0, le=1.0)
+    top_k: Optional[int] = Field(None, ge=0)
+    min_p: Optional[float] = Field(None, ge=0.0, le=1.0)
+    max_tokens: Optional[int] = Field(None, ge=1)
 
     # Prompt cache (closest mlx_lm.server has to "cache size")
-    prompt_cache_size: Optional[int] = None
+    prompt_cache_size: Optional[int] = Field(None, ge=0)
     prompt_cache_bytes: Optional[str] = None  # e.g. "2GB"
 
     # Quantized KV cache — shrinks context memory. mlx-vlm ONLY: mlx_lm.server

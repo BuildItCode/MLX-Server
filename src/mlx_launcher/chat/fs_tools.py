@@ -116,7 +116,8 @@ def _read_file(root: str, rel: str) -> str:
     p = _resolve(root, rel)
     if not p.is_file():
         return f"not a file: {rel}"
-    raw = p.read_bytes()
+    with p.open("rb") as f:  # bounded read: never pull a multi-GB file fully into memory
+        raw = f.read(MAX_READ_BYTES + 1)
     text = raw[:MAX_READ_BYTES].decode("utf-8", errors="replace")
     if len(raw) > MAX_READ_BYTES:
         text += f"\n… (truncated at {MAX_READ_BYTES} bytes)"

@@ -1174,3 +1174,320 @@ def test_chat_store_roundtrip(tmp_path, monkeypatch):
 
     store.delete_project(again, proj.id)
     assert store.get_chat(again, chat.id).project_id is None  # detached, not deleted
+
+
+# --- audit fixes: tool-call recovery false positives --------------------
+
+def test_recover_loose_tool_calls_ignores_explanatory_prose():
+    # the false-positive bug: a model EXPLAINING a tool (its name, then an example JSON
+    # further along the sentence) must NOT be executed as a real call — only a
+    # punctuation/"function" bridge straight to the `{` counts as a stripped call.
+    from mlx_launcher.chat.client import recover_loose_tool_calls
+
+    prose = 'You could call read_file with a path like {"path": "a.txt"} to read it.'
+    assert recover_loose_tool_calls(prose, ["read_file", "delete_path"]) == []
+    # destructive tools mentioned in prose are likewise safe
+    assert recover_loose_tool_calls('use delete_path on the old {"path": "x"} folder',
+                                    ["delete_path"]) == []
+    # but the genuine stripped artifacts ("name.{json}" / "name function.{json}") still fire
+    assert recover_loose_tool_calls('web_search.{"query": "x"}', ["web_search"]) == [
+        {"name": "web_search", "arguments": {"query": "x"}}]
+    assert recover_loose_tool_calls('call web_search function.{"query": "y"}', ["web_search"]) == [
+        {"name": "web_search", "arguments": {"query": "y"}}]
+
+
+def test_recover_stripped_harmony_keeps_answers_starting_with_analysis():
+    # the false-positive bug: an answer that merely STARTS with "analysis" and later
+    # contains a word like "finalist"/"finalize" must not be split on a bare "final"
+    # (which cut the answer mid-word and hid its front in the reasoning panel).
+    from mlx_launcher.chat.client import parse_harmony, recover_stripped_harmony
+
+    assert recover_stripped_harmony("analysis. The finalists were chosen carefully.") is None
+    assert recover_stripped_harmony("analysisLet me finalize the report now.") is None
+    content, reason = parse_harmony("analysis. The finalists were chosen carefully.")
+    assert content == "analysis. The finalists were chosen carefully." and reason == ""
+    # the REAL stripped form (explicit assistant…final marker) is still recovered
+    assert recover_stripped_harmony("analysisThinking hard.assistantfinalHere it is.") == (
+        "Here it is.", "Thinking hard.")
+
+
+# --- audit fixes: streaming Stop, MCP robustness, teardown, data integrity --
+
+def test_iter_sse_lines_cancels_a_stalled_stream():
+    import asyncio
+
+    from mlx_launcher.acp.bridge import _CANCELLED, _iter_sse_lines
+
+    class StalledResp:
+        """aiter_lines yields one line then blocks forever (server prefilling)."""
+
+        def aiter_lines(self):
+            async def gen():
+                yield "data: hello"
+                await asyncio.Event().wait()  # never resolves
+                yield "unreachable"
+            return gen()
+
+    async def go():
+        stop = {"v": False}
+        out = []
+
+        async def consume():
+            async for raw in _iter_sse_lines(StalledResp(), lambda: stop["v"], poll=0.02):
+                out.append(raw)
+
+        async def presser():
+            while "data: hello" not in out:
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)  # let the generator enter the blocking read of line 2
+            stop["v"] = True           # Stop pressed while the stream is silent
+        await asyncio.wait_for(asyncio.gather(consume(), presser()), timeout=2.0)
+        return out
+
+    out = asyncio.run(go())
+    assert out[0] == "data: hello" and out[-1] is _CANCELLED  # interrupted, never reached line 2
+
+
+def test_open_sessions_disambiguates_truncated_tool_name_collisions(monkeypatch):
+    import asyncio
+    import types
+    from contextlib import AsyncExitStack
+
+    from mlx_launcher.chat import mcp_client
+
+    class _ACM:
+        def __init__(self, val):
+            self._val = val
+
+        async def __aenter__(self):
+            return self._val
+
+        async def __aexit__(self, *a):
+            return False
+
+    class FakeSession:
+        def __init__(self, read, write):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def initialize(self):
+            pass
+
+        async def list_tools(self):
+            long = "x" * 70  # two names whose 64-char-truncated fq collides
+            tool = lambda n: types.SimpleNamespace(name=n, description="d", inputSchema=None)
+            return types.SimpleNamespace(tools=[tool(long + "AAA"), tool(long + "BBB")])
+
+    monkeypatch.setattr("mcp.ClientSession", FakeSession)
+    monkeypatch.setattr("mcp.StdioServerParameters", lambda **k: None)
+    monkeypatch.setattr("mcp.client.stdio.stdio_client", lambda params: _ACM((None, None)))
+
+    servers = [types.SimpleNamespace(name="srv", enabled=True, transport="stdio",
+                                     command="echo", args="", env="")]
+
+    async def go():
+        async with AsyncExitStack() as stack:
+            return await mcp_client.open_sessions(stack, servers)
+
+    _sessions, specs, router = asyncio.run(go())
+    names = [s["function"]["name"] for s in specs]
+    assert len(names) == 2 and len(set(names)) == 2          # collision disambiguated
+    assert all(len(n) <= 64 for n in names) and len(router) == 2
+
+
+def test_call_mcp_returns_error_string_for_unknown_tool():
+    import asyncio
+
+    from mlx_launcher.chat import mcp_client
+
+    out = asyncio.run(mcp_client.call_mcp({}, {}, "mcp__x__missing", {}))
+    assert "unknown MCP tool" in out  # an error string, not a raised KeyError
+
+
+def test_on_unmount_unloads_the_side_chat_server(monkeypatch):
+    import asyncio
+    import types
+
+    from mlx_launcher.screens.chat import ChatScreen
+
+    class FakeMgr:
+        is_running = True
+
+        def __init__(self):
+            self.stopped = 0
+
+        async def stop(self):
+            self.stopped += 1
+
+    mgr = FakeMgr()
+    scheduled = []
+
+    class FakeApp:
+        def get_manager(self, cid):
+            return mgr
+
+        def run_worker(self, coro, **k):
+            scheduled.append(coro)
+
+    cs = ChatScreen.__new__(ChatScreen)
+    cs._side_open = True
+    cs._side_cfg = types.SimpleNamespace(id="abc")
+    cs._cancel_flags = {"main": False, "side": False}
+    monkeypatch.setattr(ChatScreen, "app", property(lambda self: FakeApp()))
+
+    cs.on_unmount()  # leaving the chat for good
+    assert cs._cancel_flags == {"main": True, "side": True}  # in-flight work cancelled
+    assert len(scheduled) == 1                                # side server stop scheduled
+    asyncio.run(scheduled[0])
+    assert mgr.stopped == 1                                   # …and it actually stops
+
+
+def test_manager_persist_does_not_clobber_concurrent_chats(tmp_path, monkeypatch):
+    # the data-loss bug: the MCP manager held its own store snapshot and wrote the whole
+    # file back, clobbering a chat saved meanwhile. _persist re-reads before saving.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    from mlx_launcher.chat.models import Chat, McpServer
+    from mlx_launcher.screens.mcp_manager import McpManagerScreen
+
+    screen = McpManagerScreen.__new__(McpManagerScreen)
+    screen.data = store.load()  # manager opens with an empty snapshot
+
+    d2 = store.load()  # another component saves a chat to disk meanwhile
+    store.upsert_chat(d2, Chat(title="kept", model="m"))
+    store.save(d2)
+
+    screen._persist(lambda d: store.upsert_mcp(d, McpServer(name="srv", command="echo")))
+
+    final = store.load()
+    assert [c.title for c in final.chats] == ["kept"]      # concurrent chat survived
+    assert [s.name for s in final.mcp_servers] == ["srv"]  # and the server was added
+
+
+# --- reasoning-effort control -------------------------------------------
+
+def test_reasoning_template_kwargs_maps_per_model_family():
+    from mlx_launcher.chat import capabilities as cap
+
+    # gpt-oss → graded reasoning_effort; 'off' clamps to 'low' (it can't fully disable)
+    assert cap.reasoning_template_kwargs("openai/gpt-oss-20b", "high") == {"reasoning_effort": "high"}
+    assert cap.reasoning_template_kwargs("gpt-oss-120b", "off") == {"reasoning_effort": "low"}
+    # Qwen3 → enable_thinking bool (on for any level, off disables thinking)
+    assert cap.reasoning_template_kwargs("Qwen3-8B", "medium") == {"enable_thinking": True}
+    assert cap.reasoning_template_kwargs("Qwen3-8B", "off") == {"enable_thinking": False}
+    # 'auto' (None) sends nothing; a non-reasoning model sends nothing
+    assert cap.reasoning_template_kwargs("gpt-oss-20b", None) == {}
+    assert cap.reasoning_template_kwargs("llama-3-8b-instruct", "high") == {}
+    # other reasoning families get a best-effort effort hint (ignored if unsupported)
+    assert cap.reasoning_template_kwargs("deepseek-r1-distill-qwen", "medium") == {"reasoning_effort": "medium"}
+    # gpt-oss is now recognized as a reasoning model (so the chip shows for it)
+    assert cap.supports_reasoning("openai/gpt-oss-20b") is True
+
+
+def test_bridge_sends_chat_template_kwargs(monkeypatch):
+    import asyncio
+
+    import mlx_launcher.acp.bridge as bridge_mod
+    from mlx_launcher.acp.bridge import MlxBridge
+
+    captured = {}
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            captured.update(json)
+            return FakeResp()
+
+    monkeypatch.setattr(bridge_mod.httpx, "AsyncClient", FakeClient)
+    br = MlxBridge("http://x/v1", "m", chat_template_kwargs={"reasoning_effort": "high"})
+    asyncio.run(br.chat([{"role": "user", "content": "hi"}]))
+    assert captured["chat_template_kwargs"] == {"reasoning_effort": "high"}
+
+    # none set → key omitted (the server's template default applies)
+    captured.clear()
+    asyncio.run(MlxBridge("http://x/v1", "m").chat([{"role": "user", "content": "hi"}]))
+    assert "chat_template_kwargs" not in captured
+
+
+def test_effort_chip_cycles_and_reflects_state():
+    from mlx_launcher.chat.models import Chat
+    from mlx_launcher.screens.chat import ChatScreen
+
+    class FakeChip:
+        def __init__(self):
+            self.label = ""
+            self.classes = set()
+
+        def update(self, txt):
+            self.label = str(txt)
+
+        def set_class(self, add, name):
+            (self.classes.add if add else self.classes.discard)(name)
+
+    chip = FakeChip()
+    cs = ChatScreen.__new__(ChatScreen)
+    cs.chat = Chat(title="t", model="openai/gpt-oss-20b")  # a reasoning model
+    cs.query_one = lambda *a, **k: chip
+    cs.notify = lambda *a, **k: None
+    cs._persist = lambda: None
+
+    assert cs.chat.reasoning_effort is None                       # auto by default
+    cs._cycle_effort(); assert cs.chat.reasoning_effort == "off"
+    cs._cycle_effort(); assert cs.chat.reasoning_effort == "low"
+    cs._cycle_effort(); cs._cycle_effort(); assert cs.chat.reasoning_effort == "high"
+    cs._cycle_effort(); assert cs.chat.reasoning_effort is None    # wraps back to auto
+    assert chip.label == "effort: auto" and "hidden" not in chip.classes  # shown for gpt-oss
+
+
+def test_effort_chip_renders_and_hides_for_non_reasoning_models(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))  # hermetic: never touch the real store
+    import asyncio
+
+    from textual.widgets import Static
+
+    from mlx_launcher.app import MlxLauncherApp
+    from mlx_launcher.screens.chat import ChatScreen
+
+    async def go():
+        app = MlxLauncherApp()
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause(0.2)
+            await app.push_screen(ChatScreen())
+            await pilot.pause(0.3)
+            scr = app.screen
+            chip = scr.query_one("#chip-effort", Static)
+
+            # a reasoning model → chip is visible; 'auto' is the unlit default
+            scr.chat.model = "openai/gpt-oss-20b"
+            scr._sync_effort_chip()
+            await pilot.pause()
+            assert not chip.has_class("hidden") and not chip.has_class("-on")
+            scr._cycle_effort()  # auto → off
+            await pilot.pause()
+            assert scr.chat.reasoning_effort == "off" and chip.has_class("-on")  # set → lit
+
+            # a non-reasoning model → chip hides itself
+            scr.chat.model = "llama-3-8b-instruct"
+            scr._sync_effort_chip()
+            await pilot.pause()
+            assert chip.has_class("hidden")
+
+    asyncio.run(go())

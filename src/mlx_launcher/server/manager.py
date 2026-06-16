@@ -100,6 +100,8 @@ class ServerManager:
     # --- lifecycle -------------------------------------------------------
 
     async def start(self) -> None:
+        if self.is_running:
+            return  # already running — never overwrite a live process (it would orphan it)
         binary = discovery.binary_name(self.cfg.engine)
         mlx = self._mlx_override or self.cfg.mlx_server_path or discovery.find_server_binary(self.cfg.engine)
         if not mlx:
@@ -212,11 +214,32 @@ class ServerManager:
         self._cancel_tasks()
 
     def terminate(self) -> None:
-        """Best-effort synchronous kill, for app shutdown (no await)."""
+        """Best-effort synchronous SIGTERM, for app shutdown (no await)."""
         self._stopping = True
         proc = self.proc
         if proc is not None and proc.returncode is None:
             self._signal_group(proc, signal.SIGTERM)
+
+    def is_alive(self) -> bool:
+        """Liveness checked via the OS — works even when the event loop is no longer
+        reaping the subprocess (e.g. during app shutdown), unlike `is_running`."""
+        proc = self.proc
+        if proc is None:
+            return False
+        try:
+            os.kill(proc.pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    def kill_now(self) -> None:
+        """Synchronous SIGKILL of the process group — last-resort shutdown."""
+        self._stopping = True
+        proc = self.proc
+        if proc is not None:
+            self._signal_group(proc, signal.SIGKILL)
 
     @staticmethod
     def _signal_group(proc: asyncio.subprocess.Process, sig: int) -> None:

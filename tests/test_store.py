@@ -35,3 +35,16 @@ def test_corrupt_file_is_backed_up(tmp_path, monkeypatch):
     loaded = store.load()  # must not raise
     assert loaded.servers == []
     assert list(path.parent.glob("servers.corrupt-*.json"))
+
+
+def test_server_config_rejects_out_of_range_values():
+    import pytest
+    from pydantic import ValidationError
+
+    # valid edge values are accepted
+    ServerConfig(model="/m", port=8080, temp=0.0, top_p=1.0, min_p=0.0, max_tokens=1, top_k=0)
+    # nonsense is caught at construction instead of surfacing as a cryptic engine crash
+    for bad in (dict(port=0), dict(port=70000), dict(top_p=1.5), dict(temp=-0.1),
+                dict(max_tokens=0), dict(top_k=-1), dict(min_p=2.0)):
+        with pytest.raises(ValidationError):
+            ServerConfig(model="/m", **bad)

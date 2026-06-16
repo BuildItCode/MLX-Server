@@ -11,6 +11,7 @@ Two modes, chosen per prompt:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -50,6 +51,11 @@ _FINISH_MAP = {
 
 _MAX_TOOL_ITERS = 12
 _TOOL_OUTPUT_LIMIT = 4000
+_TERMINAL_TIMEOUT = 120.0  # cap a single run_command so a hung process can't block the turn
+
+
+class _Cancelled(Exception):
+    """Raised internally when a session is cancelled during a blocking model call."""
 
 
 def _truncate(text: str, limit: int = _TOOL_OUTPUT_LIMIT) -> str:
@@ -92,6 +98,9 @@ class MlxAcpAgent:
         self._client: Optional[acp.Client] = None
         self._sessions: dict[str, list[dict]] = {}
         self._cancelled: set[str] = set()
+        # One lock per session so two overlapping prompts can't interleave appends into
+        # the same history list (which would produce malformed assistant/tool sequences).
+        self._locks: dict[str, asyncio.Lock] = {}
         # client capabilities (learned at initialize)
         self._fs_read = False
         self._fs_write = False
@@ -115,7 +124,8 @@ class MlxAcpAgent:
         self._terminal = bool(getattr(client_capabilities, "terminal", False)) if client_capabilities else False
         log.info("client caps: fs_read=%s fs_write=%s terminal=%s", self._fs_read, self._fs_write, self._terminal)
         return acp.InitializeResponse(
-            protocol_version=acp.PROTOCOL_VERSION,
+            # negotiate down: never claim a newer protocol than the client asked for
+            protocol_version=min(protocol_version, acp.PROTOCOL_VERSION),
             agent_capabilities=AgentCapabilities(
                 load_session=False,
                 prompt_capabilities=PromptCapabilities(image=False, audio=False, embedded_context=True),
@@ -136,9 +146,17 @@ class MlxAcpAgent:
         self._cancelled.add(session_id)
 
     async def prompt(self, prompt: list, session_id: str, message_id: Optional[str] = None, **kwargs: Any) -> acp.PromptResponse:
-        if self.use_tools and (self._fs_read or self._fs_write or self._terminal):
-            return await self._agentic_prompt(prompt, session_id)
-        return await self._chat_prompt(prompt, session_id)
+        if session_id not in self._sessions:
+            raise acp.RequestError.invalid_params({"session_id": session_id, "reason": "unknown session"})
+        # Serialize prompts per session: a second prompt for the same session waits for the
+        # first to finish rather than interleaving into its shared history.
+        lock = self._locks.get(session_id)
+        if lock is None:
+            lock = self._locks[session_id] = asyncio.Lock()
+        async with lock:
+            if self.use_tools and (self._fs_read or self._fs_write or self._terminal):
+                return await self._agentic_prompt(prompt, session_id)
+            return await self._chat_prompt(prompt, session_id)
 
     # --- chat mode (streaming) ------------------------------------------
 
@@ -182,7 +200,10 @@ class MlxAcpAgent:
                 self._cancelled.discard(session_id)
                 return acp.PromptResponse(stop_reason="cancelled")
             try:
-                data = await self.bridge.chat(history, tools=tools or None)
+                data = await self._chat_cancellable(history, tools, session_id)
+            except _Cancelled:
+                self._cancelled.discard(session_id)
+                return acp.PromptResponse(stop_reason="cancelled")
             except (httpx.HTTPError, OSError) as exc:
                 await self._emit(session_id, update_agent_message_text(self._unreachable_msg(exc)))
                 return acp.PromptResponse(stop_reason="end_turn")
@@ -207,6 +228,18 @@ class MlxAcpAgent:
                 history.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": result})
 
         return acp.PromptResponse(stop_reason="max_turn_requests")
+
+    async def _chat_cancellable(self, history: list[dict], tools: list[dict], session_id: str) -> dict:
+        """One non-streaming completion that aborts promptly on cancel — the request can
+        otherwise block for up to bridge.read_timeout (600s) with Stop having no effect."""
+        task = asyncio.ensure_future(self.bridge.chat(history, tools=tools or None))
+        while True:
+            done, _pending = await asyncio.wait({task}, timeout=0.2)
+            if done:
+                return task.result()
+            if session_id in self._cancelled:
+                task.cancel()
+                raise _Cancelled()
 
     def _tool_specs(self) -> list[dict]:
         specs: list[dict] = []
@@ -280,7 +313,13 @@ class MlxAcpAgent:
         resp = await self._client.create_terminal(command="/bin/sh", session_id=session_id, args=["-c", command], cwd=cwd)
         tid = resp.terminal_id
         try:
-            await self._client.wait_for_terminal_exit(session_id=session_id, terminal_id=tid)
+            try:
+                await asyncio.wait_for(
+                    self._client.wait_for_terminal_exit(session_id=session_id, terminal_id=tid),
+                    timeout=_TERMINAL_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                return f"command timed out after {int(_TERMINAL_TIMEOUT)}s"
             out = await self._client.terminal_output(session_id=session_id, terminal_id=tid)
             return out.output
         finally:

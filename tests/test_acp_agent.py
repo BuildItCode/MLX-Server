@@ -64,6 +64,28 @@ async def test_prompt_streams_message_chunks():
     assert "".join(texts) == "Hello world"
 
 
+async def test_prompt_rejects_unknown_session():
+    import acp
+    import pytest
+
+    agent = MlxAcpAgent(BASE, "test-model")
+    agent.on_connect(FakeClient())
+    await agent.initialize(1)
+    # a prompt for a session that was never created is a protocol error, not a silent
+    # empty-history turn
+    with pytest.raises(acp.RequestError):
+        await agent.prompt([text_block("hi")], "never-created")
+
+
+async def test_initialize_negotiates_protocol_version_down():
+    import acp
+
+    agent = MlxAcpAgent(BASE, "test-model")
+    # a client announcing a newer protocol gets our (older) version back, not a higher claim
+    init = await agent.initialize(999)
+    assert init.protocol_version == acp.PROTOCOL_VERSION
+
+
 async def test_finish_reason_length_maps_to_max_tokens():
     with respx.mock:
         respx.post(CHAT).mock(

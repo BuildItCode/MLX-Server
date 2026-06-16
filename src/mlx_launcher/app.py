@@ -6,6 +6,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import time
 from typing import Optional
 
 from textual.app import App
@@ -72,14 +73,16 @@ class MlxLauncherApp(App):
     #transcript { height: 1fr; padding: 0 1; }
     #attachments { height: auto; padding: 0 1; }
     #attach { margin: 0 1; }
-    #chat-actions { height: auto; padding: 0 1; align-vertical: middle; }
-    #chat-actions Button { margin: 0 1 0 0; }
+    #chat-actions { height: auto; padding: 0 1 1 1; }
+    /* compact, flat secondary actions (sit below the input row) */
+    #chat-actions Button { height: 1; min-width: 0; border: none; padding: 0 1; margin: 0 1 0 0; color: $text-muted; background: $panel; }
+    #chat-actions Button:hover { color: $text; }
     #chat-inputrow { height: auto; padding: 0 1 1 1; }
     #prompt { width: 1fr; height: 6; border: round $panel; border-title-color: $accent; }
     #chat-inputrow Button { margin: 0 0 0 1; }
-    #chat-toggles { height: auto; padding: 0 1; }
+    #chat-chips { height: auto; padding: 1 1; align-vertical: middle; }
     .actions-spacer { width: 1fr; height: 1; }
-    .ctx-bar { width: auto; padding: 1 1 0 0; }
+    .ctx-bar { width: auto; padding: 0; }
     /* click-to-toggle chips (plan/reason/web/coding/tools) + connectors button */
     .chip { width: auto; height: 1; padding: 0 1; margin: 0 1 0 0; color: $text-muted; background: $panel; }
     .chip:hover { color: $text; }
@@ -238,9 +241,19 @@ class MlxLauncherApp(App):
         return [m for m in self._managers.values() if m.is_running]
 
     def on_unmount(self) -> None:
-        # Best-effort: don't orphan server processes on quit.
-        for manager in self._managers.values():
+        # Don't orphan model-server subprocesses on quit: SIGTERM them all, give them a
+        # moment to exit, then SIGKILL any survivor. A server still loading weights can be
+        # slow to honor SIGTERM and would otherwise outlive us holding memory and the port
+        # (children run in their own session, so they aren't killed along with us).
+        running = [m for m in self._managers.values() if m.is_running]
+        for manager in running:
             manager.terminate()
+        deadline = time.monotonic() + 2.0
+        while running and time.monotonic() < deadline:
+            time.sleep(0.05)
+            running = [m for m in running if m.is_alive()]
+        for manager in running:
+            manager.kill_now()
 
 
 def run() -> None:

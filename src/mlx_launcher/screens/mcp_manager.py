@@ -75,6 +75,15 @@ class McpManagerScreen(Screen):
     def _by_id(self, sid):
         return next((s for s in self.data.mcp_servers if s.id == sid), None)
 
+    def _persist(self, mutate) -> None:
+        """Re-read the store, apply `mutate`, then save. chats.json is one document shared
+        with chats/projects/subagents, so we never write back a stale snapshot that would
+        clobber edits made elsewhere (e.g. a chat message saved by a background worker)."""
+        fresh = store.load()
+        mutate(fresh)
+        store.save(fresh)
+        self.data = fresh
+
     @on(ListView.Selected, "#mcp-list")
     def _toggle_selected(self, event: ListView.Selected) -> None:
         self._toggle(getattr(event.item, "server_id", None))
@@ -85,17 +94,22 @@ class McpManagerScreen(Screen):
 
     def _toggle(self, sid) -> None:
         s = self._by_id(sid)
-        if s:
-            s.enabled = not s.enabled
-            store.save(self.data)
-            self._refresh()
+        if not s:
+            return
+        new_enabled = not s.enabled
+
+        def mut(d):
+            t = next((x for x in d.mcp_servers if x.id == sid), None)
+            if t is not None:
+                t.enabled = new_enabled
+        self._persist(mut)
+        self._refresh()
 
     def action_delete(self) -> None:
         item = self.query_one("#mcp-list", ListView).highlighted_child
         sid = getattr(item, "server_id", None)
         if sid:
-            store.delete_mcp(self.data, sid)
-            store.save(self.data)
+            self._persist(lambda d: store.delete_mcp(d, sid))
             self._refresh()
             self.notify("Server removed")
 
@@ -120,8 +134,7 @@ class McpManagerScreen(Screen):
         if transport == "sse" and not srv.url:
             self.notify("URL is required for sse", severity="error")
             return
-        store.upsert_mcp(self.data, srv)
-        store.save(self.data)
+        self._persist(lambda d: store.upsert_mcp(d, srv))
         for fid in ("m-name", "m-command", "m-args", "m-env", "m-url"):
             self.query_one(f"#{fid}", Input).value = ""
         self._refresh()

@@ -22,8 +22,12 @@ _VISION_HINTS = (
 _REASONING_HINTS = (
     "deepseek-r1", "r1-distill", "-r1", "qwq", "qwen3", "magistral",
     "openthinker", "glm-z1", "skywork-o1", "marco-o1", "phi-4-reasoning",
-    "phi-4-mini-reasoning", "thinking", "reasoner",
+    "phi-4-mini-reasoning", "thinking", "reasoner", "gpt-oss", "gpt_oss",
 )
+
+# Models whose chat template gates thinking via an `enable_thinking` bool (Qwen3-style),
+# as opposed to gpt-oss's graded `reasoning_effort`.
+_ENABLE_THINKING_HINTS = ("qwen3", "qwen-3")
 
 _IMAGE_MIME = {
     ".png": "image/png",
@@ -49,6 +53,28 @@ def supports_reasoning(model: str) -> bool:
     return any(h in m for h in _REASONING_HINTS)
 
 
+# Reasoning-effort cycle exposed in the chat UI. None = "auto" (the model/template default).
+REASONING_EFFORTS = (None, "off", "low", "medium", "high")
+
+
+def reasoning_template_kwargs(model: str, effort: str | None) -> dict:
+    """Translate a reasoning-effort choice into the `chat_template_kwargs` the model's own
+    chat template understands. Sent in the request body — mlx_lm.server / vLLM forward it to
+    `apply_chat_template`. Returns {} for 'auto' or a non-reasoning model.
+
+    gpt-oss uses a graded `reasoning_effort` (low|medium|high); Qwen3-style templates use an
+    `enable_thinking` bool. A kwarg a given template doesn't reference is harmless — it's just
+    unused Jinja context — so worst case the setting is silently a no-op for that model."""
+    if not effort or not supports_reasoning(model):
+        return {}
+    m = _norm(model)
+    if "gpt-oss" in m or "gpt_oss" in m:
+        return {"reasoning_effort": "low" if effort == "off" else effort}  # can't fully disable
+    if any(h in m for h in _ENABLE_THINKING_HINTS):
+        return {"enable_thinking": effort != "off"}
+    return {} if effort == "off" else {"reasoning_effort": effort}
+
+
 def image_mime(path: str) -> str | None:
     return _IMAGE_MIME.get(os.path.splitext(path)[1].lower())
 
@@ -57,14 +83,19 @@ def classify(path: str) -> str:
     return "image" if image_mime(path) else "text"
 
 
+_MAX_IMAGE_BYTES = 16_000_000  # skip absurdly large images rather than bloating the request
+
+
 def encode_image(path: str) -> str | None:
-    """Return a data: URL for an image file, or None if unreadable/not an image."""
+    """Return a data: URL for an image file, or None if unreadable/not an image/too big."""
     mime = image_mime(path)
     if not mime or not os.path.isfile(path):
         return None
     try:
+        if os.path.getsize(path) > _MAX_IMAGE_BYTES:
+            return None
         with open(path, "rb") as f:
-            data = f.read()
+            data = f.read(_MAX_IMAGE_BYTES)
     except OSError:
         return None
     return f"data:{mime};base64," + base64.b64encode(data).decode("ascii")

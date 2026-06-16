@@ -117,8 +117,11 @@ class SubagentEditorScreen(Screen):
         sub.mcp_server_ids = self._selected("mcp")
         sub.skill_ids = self._selected("skill")
         sub.max_tokens = max_tokens
-        store.upsert_subagent(self.data, sub)
-        store.save(self.data)
+        # Re-read before writing: chats.json is one document (chats/projects/subagents),
+        # so saving a stale snapshot here would clobber edits made elsewhere meanwhile.
+        fresh = store.load()
+        store.upsert_subagent(fresh, sub)
+        store.save(fresh)
         self.notify(f"Saved {name}")
         return True
 

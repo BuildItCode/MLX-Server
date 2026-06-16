@@ -35,7 +35,13 @@ def save(data: ChatStoreFile) -> Path:
     d.mkdir(parents=True, exist_ok=True)
     path = chats_path()
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(data.model_dump_json(indent=2), encoding="utf-8")
+    # flush + fsync before the atomic rename so a crash/power-loss can't leave the temp
+    # (and thus the renamed file) truncated — os.replace alone doesn't guarantee the data
+    # blocks are on disk before the directory entry is swapped.
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(data.model_dump_json(indent=2))
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
     return path
 

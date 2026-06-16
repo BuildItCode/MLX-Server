@@ -40,6 +40,38 @@ def test_exit_message_generic_fallback():
     assert "code 7" in mgr._exit_message(7)
 
 
+def test_start_is_a_noop_when_already_running(monkeypatch):
+    import asyncio
+
+    from mlx_launcher.config.models import ServerConfig
+    from mlx_launcher.server.manager import ServerManager
+
+    mgr = ServerManager(ServerConfig(model="/m", port=8080))
+
+    class FakeProc:
+        returncode = None  # alive
+        pid = 999999
+
+    mgr.proc = sentinel = FakeProc()
+    spawned = {"n": 0}
+
+    async def boom(*a, **k):
+        spawned["n"] += 1
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", boom)
+    asyncio.run(mgr.start())
+    # the guard returns before spawning, so the live process is neither overwritten nor
+    # joined by a second orphan
+    assert mgr.proc is sentinel and spawned["n"] == 0
+
+
+def test_is_alive_is_false_without_a_process():
+    from mlx_launcher.config.models import ServerConfig
+    from mlx_launcher.server.manager import ServerManager
+
+    assert ServerManager(ServerConfig(model="/m")).is_alive() is False
+
+
 def test_readiness_regex():
     m = STARTING_RE.search("Starting httpd at 127.0.0.1 on port 8080...")
     assert m and m.group(1) == "8080"

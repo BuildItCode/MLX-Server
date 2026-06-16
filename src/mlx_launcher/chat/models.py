@@ -50,6 +50,7 @@ class Chat(BaseModel):
     model: str = ""
     skill_id: Optional[str] = None  # active skill injected as system guidance
     reasoning: bool = False  # show/stream the model's thinking
+    reasoning_effort: Optional[str] = None  # off|low|medium|high; None = model/template default
     web_search: bool = False  # allow the model to call the web_search tool
     tools: bool = False  # allow the model to call MCP server tools
     plan_mode: bool = False  # plan-only: produce a plan for approval, take no actions

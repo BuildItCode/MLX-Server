@@ -28,17 +28,24 @@ def web_search_spec() -> dict:
     return WEB_SEARCH_SPEC
 
 
+_SEARCH_TIMEOUT = 15.0  # bound the network call so a slow/hung DDG request can't stall the turn
+
+
 async def run_web_search(query: str, max_results: int = 6) -> str:
     max_results = max(1, min(int(max_results or 6), 10))
 
     def _search() -> list:
         from ddgs import DDGS
 
-        with DDGS() as ddgs:
+        with DDGS(timeout=_SEARCH_TIMEOUT) as ddgs:
             return list(ddgs.text(query, max_results=max_results))
 
     try:
-        rows = await asyncio.to_thread(_search)
+        # The inner DDGS timeout bounds each HTTP call; wait_for is a backstop in case the
+        # library hangs anyway (the abandoned worker thread then just exits on its own).
+        rows = await asyncio.wait_for(asyncio.to_thread(_search), timeout=_SEARCH_TIMEOUT + 5)
+    except asyncio.TimeoutError:
+        return "web_search error: timed out"
     except Exception as exc:  # noqa: BLE001
         return f"web_search error: {exc}"
     if not rows:

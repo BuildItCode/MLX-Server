@@ -467,26 +467,27 @@ class ChatScreen(Screen):
                             yield Static("", id="side-title")
                             yield Button("✕ Close", id="side-close", variant="error")
                         yield VerticalScroll(id="side-transcript")
-                with Horizontal(id="chat-toggles"):
-                    yield Static("", id="context-bar", classes="ctx-bar")
-                with Horizontal(id="chat-actions"):
-                    yield Button("↻ Regenerate", id="regenerate")
-                    yield Button("✎ Edit last", id="edit-last")
-                    yield Button("⤓ Export", id="export")
-                    yield Static(classes="actions-spacer")
+                with Horizontal(id="chat-chips"):  # chips + the context counter, pushed right
                     yield ToggleChip("plan", "plan", id="chip-plan")
                     yield ToggleChip("reason", "reasoning", id="chip-reasoning")
+                    yield Static("effort: auto", id="chip-effort", classes="chip")
                     yield ToggleChip("web", "web", id="chip-web")
                     yield ToggleChip("coding", "coding", id="chip-coding")
                     yield ToggleChip("tools", "tools", id="chip-tools")
                     yield Static("connectors ▾", id="chip-connectors", classes="chip chip-action")
                     yield Static("subagents ▾", id="chip-subagents", classes="chip chip-action")
+                    yield Static(classes="actions-spacer")  # pushes the context counter to the right edge
+                    yield Static("", id="context-bar", classes="ctx-bar")
                 yield Static("", id="attachments", classes="hidden")
                 yield Input(id="attach", placeholder="paste a file path, Enter to attach", classes="hidden")
                 with Horizontal(id="chat-inputrow"):
                     yield PromptArea(id="prompt", soft_wrap=True)
                     yield Button("+ Attach", id="attach-btn")
                     yield Button("Send", id="send", variant="primary")
+                with Horizontal(id="chat-actions"):  # secondary actions, compact, below the input
+                    yield Button("↻ Regenerate", id="regenerate")
+                    yield Button("✎ Edit last", id="edit-last")
+                    yield Button("⤓ Export", id="export")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -683,6 +684,24 @@ class ChatScreen(Screen):
         # _close_side_chat already cancels + stops the server
         self.run_worker(self._close_side_chat(unload=True))
 
+    def on_unmount(self) -> None:
+        # Leaving the chat for good (the screen is being popped): stop in-flight generation
+        # and unload a side-chat subagent's server. That server lives on the app, not this
+        # screen, so without this it stays resident (GBs of weights) until the app quits.
+        # on_screen_suspend is deliberately NOT used — pushing a modal/manager on top must
+        # not tear the side chat down.
+        flags = getattr(self, "_cancel_flags", None)
+        if isinstance(flags, dict):
+            flags["main"] = flags["side"] = True
+        cfg = getattr(self, "_side_cfg", None)
+        if getattr(self, "_side_open", False) and cfg is not None:
+            mgr = self.app.get_manager(cfg.id)
+            if mgr is not None and mgr.is_running:
+                try:
+                    self.app.run_worker(mgr.stop(), exclusive=False)
+                except Exception:  # noqa: BLE001 — app may be tearing down too
+                    pass
+
     # --- opening / creating ---------------------------------------------
 
     def _default_server(self) -> Optional[ServerConfig]:
@@ -701,7 +720,9 @@ class ChatScreen(Screen):
         never the server's truncating 512-token default."""
         cfg = self._server_by_id(self.chat.server_id) if (self.chat and self.chat.server_id) else None
         max_tokens = (cfg.max_tokens if cfg and cfg.max_tokens else DEFAULT_MAX_TOKENS)
-        return ChatClient(self.chat.base_url, self.chat.model, max_tokens=max_tokens)
+        ctk = capabilities.reasoning_template_kwargs(self.chat.model, self.chat.reasoning_effort)
+        return ChatClient(self.chat.base_url, self.chat.model, max_tokens=max_tokens,
+                          chat_template_kwargs=ctk or None)
 
     def _server_label_for(self, chat: Optional[Chat]) -> str:
         """The user-given profile name for a chat's server (falls back to the model)."""
@@ -748,6 +769,33 @@ class ChatScreen(Screen):
         supported = bool(self.chat and capabilities.supports_reasoning(self.chat.model))
         chip.set_enabled(supported)
         chip.set_value(bool(self.chat and self.chat.reasoning and supported))
+        self._sync_effort_chip()
+
+    _EFFORT_CYCLE = (None, "off", "low", "medium", "high")
+
+    def _sync_effort_chip(self) -> None:
+        """Reflect the reasoning-effort level; the chip shows only for reasoning models."""
+        try:
+            chip = self.query_one("#chip-effort", Static)
+        except Exception:  # noqa: BLE001 — not mounted yet
+            return
+        supported = bool(self.chat and capabilities.supports_reasoning(self.chat.model))
+        chip.set_class(not supported, "hidden")
+        effort = self.chat.reasoning_effort if self.chat else None
+        chip.update(f"effort: {effort or 'auto'}")
+        chip.set_class(bool(effort), "-on")
+
+    def _cycle_effort(self) -> None:
+        """Click the effort chip: cycle auto → off → low → medium → high → auto. Maps to the
+        right chat-template kwarg per model (gpt-oss reasoning_effort / Qwen3 enable_thinking)."""
+        if not self.chat:
+            return
+        cur = self.chat.reasoning_effort if self.chat.reasoning_effort in self._EFFORT_CYCLE else None
+        self.chat.reasoning_effort = self._EFFORT_CYCLE[
+            (self._EFFORT_CYCLE.index(cur) + 1) % len(self._EFFORT_CYCLE)]
+        self._sync_effort_chip()
+        self._persist()
+        self.notify(f"Reasoning effort: {self.chat.reasoning_effort or 'auto (model default)'}")
 
     def _update_topbar(self) -> None:
         if not self.chat:
@@ -1065,6 +1113,9 @@ class ChatScreen(Screen):
             return
         if wid == "chip-subagents":
             self._open_subagents_modal()
+            return
+        if wid == "chip-effort":
+            self._cycle_effort()
             return
         if event.widget is not None and event.widget.has_class("msg-copy"):
             text = getattr(event.widget, "_copy_text", "")

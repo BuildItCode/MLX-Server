@@ -174,16 +174,15 @@ def recover_stripped_harmony(text: str) -> Optional[tuple[str, str]]:
     if not text or "<|" in text:  # literal-token form → HarmonyParser handles it
         return None
     has_lead = bool(_STRIPPED_LEAD_RE.match(text))
-    # 'assistantfinal' glued is unambiguous; allow a single space only with a lead name
+    # 'assistantfinal' glued is unambiguous; allow a single space only with a lead name.
+    # We require the explicit 'assistant…final' role marker (the real stripped form always
+    # has it) rather than splitting on a bare 'final' — that fallback corrupted ordinary
+    # answers opening with "analysis" that contain a word like "finalize"/"finalist"
+    # (e.g. "analysis. The finalists were chosen." → answer cut mid-word).
     m = re.search(r"assistant ?final", text) if has_lead else re.search(r"assistantfinal", text)
     if m:
         reason = _STRIPPED_LEAD_RE.sub("", text[:m.start()], count=1)
         return text[m.end():].strip(), reason.strip()
-    if has_lead:  # leading channel name, no assistant marker → split on a glued 'final'
-        fm = re.search(r"final(?=\S)", text)
-        if fm and fm.start() > 0:
-            reason = _STRIPPED_LEAD_RE.sub("", text[:fm.start()], count=1)
-            return text[fm.end():].strip(), reason.strip()
     return None
 
 
@@ -256,14 +255,19 @@ def parse_harmony_tool_calls(text: str) -> list[dict]:
 # Last-resort recovery: a known tool name immediately followed by a JSON object, for
 # servers that strip the Harmony delimiters. gpt-oss on mlx_lm can leave its call as
 # e.g.  "…Use web_search function.{\"query\": …}"  with no <|call|> token to match.
-_LOOSE_BRIDGE = re.compile(r"[\s.:=)\"'`a-zA-Z_]{0,40}\{")
+# The bridge between the name and the `{` may be ONLY whitespace/punctuation and the
+# optional literal word "function" (gpt-oss's stripped artifact) — never arbitrary
+# prose — so a sentence that merely explains a tool ("call read_file with a path like
+# {…}") is not misread as a real, executable call.
+_LOOSE_BRIDGE = re.compile(r"""[\s(]*(?:function)?[\s.:=)"'`]*\{""")
 
 
 def recover_loose_tool_calls(text: str, tool_names: list[str]) -> list[dict]:
-    """[{name, arguments}] for any KNOWN tool name followed closely by a parseable
-    JSON object. Deliberately conservative — a short, word/punctuation-only bridge to
-    the `{`, known names only, and the JSON must actually parse — so ordinary prose
-    that merely mentions a tool isn't misread as a call. Empty list when nothing fits."""
+    """[{name, arguments}] for any KNOWN tool name followed immediately by a parseable
+    JSON object. Deliberately conservative — only whitespace/punctuation (and gpt-oss's
+    "function" artifact) may bridge to the `{`, known names only, and the JSON must
+    actually parse — so ordinary prose that merely mentions a tool isn't misread as a
+    call. Empty list when nothing fits."""
     text = text or ""
     out: list[dict] = []
     for name in tool_names:
@@ -375,9 +379,12 @@ DEFAULT_MAX_TOKENS = 16384
 
 class ChatClient:
     def __init__(
-        self, base_url: str, model: str, api_key: str = "not-needed", max_tokens: int = DEFAULT_MAX_TOKENS
+        self, base_url: str, model: str, api_key: str = "not-needed",
+        max_tokens: int = DEFAULT_MAX_TOKENS, chat_template_kwargs: Optional[dict] = None,
     ) -> None:
-        self.bridge = MlxBridge(base_url, model, api_key, max_tokens=max_tokens)
+        self.bridge = MlxBridge(
+            base_url, model, api_key, max_tokens=max_tokens, chat_template_kwargs=chat_template_kwargs
+        )
 
     async def stream(
         self,

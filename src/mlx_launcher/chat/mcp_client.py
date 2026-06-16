@@ -3,10 +3,14 @@ and route tool calls to them. Sessions are opened per turn via an AsyncExitStack
 
 from __future__ import annotations
 
+import asyncio
 import re
 import shlex
 from contextlib import AsyncExitStack
 from typing import Callable, Optional
+
+_CONNECT_TIMEOUT = 20.0  # per-server cap on connect+initialize+list_tools, so one
+# unresponsive MCP server can't hang the whole chat turn
 
 
 def slug(name: str) -> str:
@@ -36,46 +40,69 @@ async def open_sessions(
     sessions: dict = {}
     specs: list = []
     router: dict = {}
+
+    async def _connect(srv):
+        """Open a session and list its tools — bounded so one bad server can't hang."""
+        if srv.transport == "sse":
+            read, write = await stack.enter_async_context(sse_client(srv.url))
+        else:
+            params = StdioServerParameters(
+                command=srv.command,
+                args=shlex.split(srv.args or ""),
+                env=_parse_env(srv.env),
+            )
+            read, write = await stack.enter_async_context(stdio_client(params))
+        session = await stack.enter_async_context(ClientSession(read, write))
+        await session.initialize()
+        return session, await session.list_tools()
+
     for srv in servers:
         if not getattr(srv, "enabled", True):
             continue
         try:
-            if srv.transport == "sse":
-                read, write = await stack.enter_async_context(sse_client(srv.url))
-            else:
-                params = StdioServerParameters(
-                    command=srv.command,
-                    args=shlex.split(srv.args or ""),
-                    env=_parse_env(srv.env),
-                )
-                read, write = await stack.enter_async_context(stdio_client(params))
-            session = await stack.enter_async_context(ClientSession(read, write))
-            await session.initialize()
-            listed = await session.list_tools()
-            sessions[srv.name] = session
-            for tool in listed.tools:
-                fq = f"mcp__{slug(srv.name)}__{tool.name}"[:64]
-                specs.append(
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": fq,
-                            "description": (tool.description or tool.name)[:1024],
-                            "parameters": tool.inputSchema or {"type": "object", "properties": {}},
-                        },
-                    }
-                )
-                router[fq] = (srv.name, tool.name)
-        except Exception as exc:  # noqa: BLE001
+            session, listed = await asyncio.wait_for(_connect(srv), timeout=_CONNECT_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001 — bad/unreachable server (timeout included)
             if on_error:
-                on_error(srv.name, str(exc))
+                reason = (f"timed out after {int(_CONNECT_TIMEOUT)}s"
+                          if isinstance(exc, asyncio.TimeoutError) else str(exc))
+                on_error(srv.name, reason)
+            continue
+        sessions[srv.name] = session
+        for tool in listed.tools:
+            base = f"mcp__{slug(srv.name)}__{tool.name}"[:64]
+            fq, n = base, 1
+            while fq in router:  # truncation/name collision → disambiguate within 64 chars
+                tag = f"_{n}"
+                fq = base[: 64 - len(tag)] + tag
+                n += 1
+            specs.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": fq,
+                        "description": (tool.description or tool.name)[:1024],
+                        "parameters": tool.inputSchema or {"type": "object", "properties": {}},
+                    },
+                }
+            )
+            router[fq] = (srv.name, tool.name)
     return sessions, specs, router
 
 
 async def call_mcp(sessions: dict, router: dict, fq_name: str, arguments: dict) -> str:
+    # Return an error string rather than raising (matches the web_search / fs-tool
+    # contract) so a hallucinated name or a server that failed to open feeds the model a
+    # result instead of aborting the agent loop.
+    if fq_name not in router:
+        return f"unknown MCP tool: {fq_name}"
     server_name, real_name = router[fq_name]
-    session = sessions[server_name]
-    result = await session.call_tool(real_name, arguments or {})
+    session = sessions.get(server_name)
+    if session is None:
+        return f"MCP server not connected: {server_name}"
+    try:
+        result = await session.call_tool(real_name, arguments or {})
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR calling {fq_name}: {exc}"
     parts = []
     for chunk in result.content or []:
         if getattr(chunk, "type", None) == "text":
