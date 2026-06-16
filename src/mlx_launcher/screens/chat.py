@@ -614,7 +614,7 @@ class ChatScreen(Screen):
                          if p not in reserved and discovery.is_port_free(base_cfg.host, p)), base_cfg.port)
         return base_cfg if port == base_cfg.port else base_cfg.model_copy(update={"port": port})
 
-    @work(exclusive=True, group="side-open")
+    @work(exclusive=True, group="side-open", exit_on_error=False)
     async def _open_side_chat(self, sub: Subagent) -> None:
         """Open a 50/50 side chat with `sub`: load its server on its own port (so the
         main model stays loaded) and route the input to it."""
@@ -976,8 +976,26 @@ class ChatScreen(Screen):
     def _chat_selected(self, event: ListView.Selected) -> None:
         cid = getattr(event.item, "chat_id", None)
         chat = store.get_chat(self.data, cid) if cid else None
-        if chat:
-            self._open_chat(chat)
+        if not chat or (self.chat and chat.id == self.chat.id):
+            return
+        if self._gen.get("main", False):
+            # the in-flight worker appends/persists into self.chat at the end — switching now
+            # would land the reply on the wrong chat (and wedge the new chat's Send button).
+            self.notify("Stop the current response before switching chats", severity="warning")
+            self._reselect_current_chat()
+            return
+        self._open_chat(chat)
+
+    def _reselect_current_chat(self) -> None:
+        """Re-highlight the open chat after refusing a list selection. Setting `.index` posts a
+        Highlighted message (not Selected), so it doesn't re-enter _chat_selected."""
+        if not self.chat:
+            return
+        lv = self.query_one("#chats", ListView)
+        for i, item in enumerate(lv.children):
+            if getattr(item, "chat_id", None) == self.chat.id:
+                lv.index = i
+                return
 
     @on(Select.Changed, "#server-select")
     def _server_changed(self, event: Select.Changed) -> None:
@@ -1534,6 +1552,10 @@ class ChatScreen(Screen):
             self.notify("Nothing selected to delete", severity="warning")
             return
         kind, ident, label = target
+        if kind == "chat" and self._gen.get("main", False):
+            # deleting mid-generation re-points self.chat, so the worker's reply lands elsewhere
+            self.notify("Stop the current response before deleting a chat", severity="warning")
+            return
         ok = await self.app.push_screen_wait(
             ConfirmModal(f'Delete this {kind}?\n"{label}"', confirm_label="Delete")
         )
@@ -1706,7 +1728,7 @@ class ChatScreen(Screen):
                 return path
         return None
 
-    @work
+    @work(exit_on_error=False)
     async def _generate(self) -> None:
         try:
             if self.chat and (self.chat.web_search or self.chat.tools or self._fs_root()):
@@ -1747,7 +1769,7 @@ class ChatScreen(Screen):
             msgs.append({"role": m.role, "content": m.text})
         return msgs
 
-    @work
+    @work(exit_on_error=False)
     async def _generate_side(self) -> None:
         """Answer the latest side-chat turn with the subagent's model: stream when it
         has no tools, else run a compact tool loop (web_search + its MCP connections)."""

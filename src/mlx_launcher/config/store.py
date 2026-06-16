@@ -35,15 +35,43 @@ def load() -> ConfigFile:
         return ConfigFile()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return ConfigFile.model_validate(data)
-    except Exception:
-        # Back up the unreadable file so the user can recover it, then start fresh.
-        try:
-            backup = path.with_name(f"servers.corrupt-{int(time.time())}.json")
-            path.rename(backup)
-        except Exception:
-            pass
+    except Exception:  # noqa: BLE001 — unparseable JSON: back up + start fresh
+        _backup(path)
         return ConfigFile()
+    try:
+        return ConfigFile.model_validate(data)
+    except Exception:  # noqa: BLE001
+        # One bad server (e.g. an out-of-range numeric field) must NOT wipe every profile.
+        # Back up the original, then salvage whichever servers still validate.
+        _backup(path)
+        return _salvage(data)
+
+
+def _backup(path: Path) -> None:
+    """Best-effort: move the unreadable file aside so the user can recover it."""
+    try:
+        path.rename(path.with_name(f"servers.corrupt-{int(time.time())}.json"))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _salvage(data) -> ConfigFile:
+    """Rebuild a ConfigFile from a dict that failed whole-file validation, keeping every
+    server that validates on its own and dropping only the bad ones."""
+    if not isinstance(data, dict):
+        return ConfigFile()
+    servers = []
+    for raw in data.get("servers") or []:
+        try:
+            servers.append(ServerConfig.model_validate(raw))
+        except Exception:  # noqa: BLE001 — drop only this one profile
+            pass
+    try:
+        settings = AppSettings.model_validate(data.get("settings") or {})
+    except Exception:  # noqa: BLE001
+        settings = AppSettings()
+    sv = data.get("schema_version")
+    return ConfigFile(schema_version=sv if isinstance(sv, int) else 1, servers=servers, settings=settings)
 
 
 def save(cfg: ConfigFile) -> Path:

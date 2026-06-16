@@ -75,6 +75,7 @@ class ServerManager:
         self._sub_ids = itertools.count(1)
         self._tasks: list[asyncio.Task] = []
         self._stopping = False
+        self._starting = False  # guards against a concurrent double-start spawning two procs
 
     @property
     def is_running(self) -> bool:
@@ -110,8 +111,17 @@ class ServerManager:
     # --- lifecycle -------------------------------------------------------
 
     async def start(self) -> None:
-        if self.is_running:
-            return  # already running — never overwrite a live process (it would orphan it)
+        # never overwrite a live process (orphan) or spawn twice under concurrent callers
+        # (e.g. a side-chat load racing a dashboard launch of the same profile).
+        if self.is_running or self._starting:
+            return
+        self._starting = True
+        try:
+            await self._do_start()
+        finally:
+            self._starting = False
+
+    async def _do_start(self) -> None:
         binary = discovery.binary_name(self.cfg.engine)
         mlx = self._mlx_override or self.cfg.mlx_server_path or discovery.find_server_binary(self.cfg.engine)
         if not mlx:

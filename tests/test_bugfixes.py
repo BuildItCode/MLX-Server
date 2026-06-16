@@ -79,3 +79,70 @@ def test_serverconfig_rejects_negative_numeric_fields():
         with pytest.raises(ValidationError):
             ServerConfig(**{field: -1})
     assert ServerConfig(quantized_kv_start=0).quantized_kv_start == 0  # 0 is a valid start index
+
+
+# --- 2nd pass: store.load salvages valid entries instead of wiping everything ---
+
+def test_config_load_salvages_valid_servers(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    from mlx_launcher.config import store
+    from mlx_launcher.config.models import ConfigFile, ServerConfig
+
+    store.save(ConfigFile(servers=[ServerConfig(name="Good", model="/m")]))
+    p = store.config_path()
+    data = json.loads(p.read_text())
+    data["servers"].append({"id": "bad", "name": "Bad", "model": "/x", "max_kv_size": -5})  # out of range
+    p.write_text(json.dumps(data))
+
+    loaded = store.load()
+    names = [s.name for s in loaded.servers]
+    assert "Good" in names and "Bad" not in names  # one bad field no longer wipes the whole file
+
+
+def test_chat_load_salvages_valid_chats(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    from mlx_launcher.chat import store as cstore
+    from mlx_launcher.chat.models import Chat, ChatStoreFile
+
+    cstore.save(ChatStoreFile(chats=[Chat(title="Keep")]))
+    p = cstore.chats_path()
+    data = json.loads(p.read_text())
+    data["chats"].append({"id": "bad", "title": "Bad", "messages": [{"role": "INVALID"}]})
+    p.write_text(json.dumps(data))
+
+    loaded = cstore.load()
+    titles = [c.title for c in loaded.chats]
+    assert "Keep" in titles and "Bad" not in titles
+
+
+# --- 2nd pass: refuse switching chats while a main generation is in flight ---
+
+def test_chat_switch_refused_during_main_generation():
+    from mlx_launcher.chat.models import Chat, ChatStoreFile
+    from mlx_launcher.screens.chat import ChatScreen
+
+    cur, other = Chat(title="current"), Chat(title="other")
+    cs = ChatScreen.__new__(ChatScreen)
+    cs.chat = cur
+    cs.data = ChatStoreFile(chats=[cur, other])
+    cs._gen = {"main": True}
+    opened: list = []
+    notes: list = []
+    cs._open_chat = lambda c: opened.append(c)
+    cs.notify = lambda *a, **k: notes.append(a)
+    cs._reselect_current_chat = lambda: None
+
+    class _Ev:
+        class item:
+            chat_id = other.id
+
+    cs._chat_selected(_Ev())
+    assert opened == [] and notes  # refused mid-generation (didn't switch, did notify)
+
+    cs._gen = {"main": False}
+    cs._chat_selected(_Ev())
+    assert opened == [other]  # switches when idle

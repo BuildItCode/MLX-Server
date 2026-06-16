@@ -21,13 +21,46 @@ def load() -> ChatStoreFile:
     if not path.exists():
         return ChatStoreFile()
     try:
-        return ChatStoreFile.model_validate(json.loads(path.read_text(encoding="utf-8")))
-    except Exception:
-        try:
-            path.rename(path.with_name(f"chats.corrupt-{int(time.time())}.json"))
-        except Exception:
-            pass
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — unparseable JSON: back up + start fresh
+        _backup(path)
         return ChatStoreFile()
+    try:
+        return ChatStoreFile.model_validate(data)
+    except Exception:  # noqa: BLE001
+        # One bad chat/project/etc. must NOT wipe the whole history — salvage the valid ones.
+        _backup(path)
+        return _salvage(data)
+
+
+def _backup(path: Path) -> None:
+    try:
+        path.rename(path.with_name(f"chats.corrupt-{int(time.time())}.json"))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _salvage(data) -> ChatStoreFile:
+    if not isinstance(data, dict):
+        return ChatStoreFile()
+
+    def items(key: str, model):
+        out = []
+        for raw in data.get(key) or []:
+            try:
+                out.append(model.model_validate(raw))
+            except Exception:  # noqa: BLE001 — drop only the bad entry
+                pass
+        return out
+
+    sv = data.get("schema_version")
+    return ChatStoreFile(
+        schema_version=sv if isinstance(sv, int) else 1,
+        projects=items("projects", Project),
+        chats=items("chats", Chat),
+        mcp_servers=items("mcp_servers", McpServer),
+        subagents=items("subagents", Subagent),
+    )
 
 
 def save(data: ChatStoreFile) -> Path:
