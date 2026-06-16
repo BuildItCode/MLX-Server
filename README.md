@@ -8,7 +8,7 @@ with them or wire them into Xcode 27. It drives four interchangeable backends:
 (`llama-server`, GGUF models) on **macOS, Linux, or Windows**.
 
 <p align="center">
-  <img src="preview.png" alt="LIS chat UI — projects/chats sidebar, skill and server pickers, context bar, and plan/reason/web/tools toggles" width="820">
+  <img src="preview.png" alt="LIS chat UI — projects/chats sidebar, skill and server pickers, context bar, and build/plan/auto mode + reason/web/tools toggles" width="820">
 </p>
 
 - **Pick the engine** per profile: **mlx-lm** (text), **mlx-vlm** (vision-language),
@@ -21,8 +21,10 @@ with them or wire them into Xcode 27. It drives four interchangeable backends:
 - **Search HuggingFace & download** from the editor (the **Search HF** button): filter by
   **GGUF** or **MLX** (MLX on Apple Silicon only), see a per-result **fit badge** against your
   device's memory (it estimates whether a model fits your RAM/VRAM), and download with a live
-  progress log. Picking one sets the matching engine (GGUF → llama.cpp, MLX → an MLX engine) and
-  fills the model field; for GGUF you choose the quant file so only that one downloads.
+  **progress bar**. Picking one sets the matching engine (GGUF → llama.cpp, MLX → an MLX engine)
+  and fills the model field; for GGUF you choose the quant file so only that one downloads. Models
+  you've already downloaded reappear in a **dropdown when you click the model field**, so one you
+  fetched but didn't save to a profile is easy to find again.
 - Tweak options (temperature, max-tokens, top-p/k, prompt cache, …) plus a free-form
   **custom params** box for anything else (e.g. quantized-KV-cache flags on servers that
   support them).
@@ -46,15 +48,19 @@ with them or wire them into Xcode 27. It drives four interchangeable backends:
   an uploaded **knowledge base** of docs/PDFs that's always in their context) and open one as a
   50/50 **side chat** beside the main model — message either pane.
 - **Code in a folder**: set a project's **working directory** (`+ Project` / Ctrl+E) and the
-  model gets file tools — `read` / `write` / `edit` / `delete` / `run_command` — scoped to
-  that folder (paths can't escape it), with an **approve / deny prompt** before anything
-  mutating. It reads `AGENTS.md` first if present.
+  model gets file tools — `read` / `write` / `edit` / `delete` / `run_command` / **`open in
+  browser`** — scoped to that folder (paths can't escape it), with an **approve / deny prompt**
+  before anything mutating (auto-approved in *auto* mode — see **Modes**). It reads `AGENTS.md`
+  first if present, and can **open a page it builds in your browser** so you can see it.
 - **Skills**: pick a `SKILL.md` instruction set per chat — bundled platform skills, your own
   **custom** ones, or installed **BMAD** skills; browse/create/install with `k`.
-- **Plan mode**: a per-chat toggle that makes the model produce a plan for you to approve
-  instead of taking action.
-- **Context bar**: a live token-usage meter showing how much of the model's context window the
-  conversation uses.
+- **Modes** (per chat — the *mode* chip, or `/build` · `/plan` · `/auto` in the prompt):
+  **build** makes changes and asks before each file/command action; **plan** produces a plan for
+  you to approve and takes no action; **auto** makes changes and runs tools without asking. Type
+  **`/help`** for the command list.
+- **Context bar & compaction**: a live token-usage meter showing how much of the model's context
+  window the conversation uses — and **`/compact`** summarizes the chat to free up space, which
+  also runs automatically once usage passes ~95%.
 - **Talk to it** (optional): a **🎙 Mic** button transcribes your speech into the prompt
   (Whisper — `mlx-whisper` on Apple Silicon, `faster-whisper` elsewhere) and a **🔊 Read aloud**
   button speaks the last reply (Kokoro-82M via `kokoro-onnx`, with the system voice as a

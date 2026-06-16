@@ -52,8 +52,9 @@ gating (`screens/editor.py`); a setup detect/install entry (`screens/setup.py` +
   registry, clipboard, and clean shutdown of server subprocesses.
 - `hf.py` — HuggingFace model **search + download** logic (Textual-free, lazy `huggingface_hub`):
   `search_models` (filter gguf/mlx), name-based size heuristic, device-RAM `recommended_budget`/`fit`,
-  GGUF quant listing, and `download_model` (`snapshot_download` with a progress callback). Behind the
-  editor's "Search HF" flow.
+  GGUF quant listing, `download_model` (`snapshot_download` with `on_progress` lines + an `on_bytes`
+  hook that drives the browse-screen progress bar), and `cached_models` (`scan_cache_dir` →
+  already-downloaded repos for the editor's model-field dropdown). Behind the editor's "Search HF" flow.
 - `screens/` — one file per screen: `dashboard`, `editor` (server profiles), `hf_browse`
   (HuggingFace model search/download), `running`, `setup`, `chat` (the large one), `mcp_manager`,
   `skills_manager`, `skill_editor`, `project_editor`, `subagent_editor`, `theme_picker`, `xcode_help`.
@@ -126,14 +127,26 @@ gating (`screens/editor.py`); a setup detect/install entry (`screens/setup.py` +
 ## Where common changes go
 
 - **A chat tool:** a spec + runner in `chat/tools.py` (or `fs_tools.py` / `mcp_client.py`),
-  wired into the loop in `screens/chat.py:_generate_tools`.
+  wired into the loop in `screens/chat.py:_generate_tools` and dispatched in `_exec_tool`. Mutating
+  fs tools live in `fs_tools.MUTATING_TOOLS` (permission-gated). `open_in_browser` is special-cased
+  in `_exec_tool` because it must run on the **UI thread** (`App.open_url`), not the threaded
+  `run_fs_tool`; its target is confined to the working dir via `fs_tools.resolve_browser_target`.
+- **Chat modes / slash commands / compaction:** the per-chat mode is `Chat.mode`
+  (`build`/`plan`/`auto`; a `model_validator` migrates the old `plan_mode` bool). It gates three
+  things — the plan system prompt (`client.build_openai_messages`), permission auto-approve in
+  `_exec_tool` (`auto`), and the mode chip + topbar. Slash commands (`/build` `/plan` `/auto`
+  `/compact` `/help`) are intercepted in `_send_main` via `_handle_slash_command`. `/compact` and
+  the >95%-usage auto-trigger (`_maybe_autocompact`, between runs only) summarize the history into a
+  user→assistant pair via `_compaction_worker`.
 - **A model capability heuristic:** `chat/capabilities.py` (name-based; always user-overridable).
 - **Voice (STT/TTS) behavior:** `chat/voice.py` (engines, model resolution, capture/playback);
   the mic / read-aloud buttons + workers in `screens/chat.py`; voice prefs on `AppSettings`
   (`config/models.py`); the install entry in `bootstrap.py` + `screens/setup.py`.
-- **HuggingFace search/download:** logic in `hf.py`; the browse screen `screens/hf_browse.py`; the
-  "Search HF" button + `_apply_hf_result` (format→engine) in `screens/editor.py`. The format→engine
-  map and the device-memory `fit` thresholds live in those two files.
+- **HuggingFace search/download:** logic in `hf.py`; the browse screen `screens/hf_browse.py` (live
+  `ProgressBar` driven by `download_model`'s `on_bytes`); the "Search HF" button + `_apply_hf_result`
+  (format→engine) in `screens/editor.py`. Already-downloaded models surface in the model-field
+  dropdown — `hf.cached_models()` + the autocomplete wiring (`_show_suggest`/`_apply_hf_result`) in
+  `screens/editor.py`. The format→engine map and the device-memory `fit` thresholds live in those two files.
 - **Install / run scripts:** `install.sh` / `run.sh` (macOS), `install-linux.sh` /
   `run-linux.sh`, `install-windows.ps1` / `run-windows.ps1`.
 
