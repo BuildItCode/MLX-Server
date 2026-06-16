@@ -50,9 +50,13 @@ gating (`screens/editor.py`); a setup detect/install entry (`screens/setup.py` +
 
 - `app.py` — the Textual `App`: theme, global CSS, screen wiring, the running-manager
   registry, clipboard, and clean shutdown of server subprocesses.
-- `screens/` — one file per screen: `dashboard`, `editor` (server profiles), `running`,
-  `setup`, `chat` (the large one), `mcp_manager`, `skills_manager`, `skill_editor`,
-  `project_editor`, `subagent_editor`, `theme_picker`, `xcode_help`.
+- `hf.py` — HuggingFace model **search + download** logic (Textual-free, lazy `huggingface_hub`):
+  `search_models` (filter gguf/mlx), name-based size heuristic, device-RAM `recommended_budget`/`fit`,
+  GGUF quant listing, and `download_model` (`snapshot_download` with a progress callback). Behind the
+  editor's "Search HF" flow.
+- `screens/` — one file per screen: `dashboard`, `editor` (server profiles), `hf_browse`
+  (HuggingFace model search/download), `running`, `setup`, `chat` (the large one), `mcp_manager`,
+  `skills_manager`, `skill_editor`, `project_editor`, `subagent_editor`, `theme_picker`, `xcode_help`.
 - `server/` — `manager.py` (one server subprocess: spawn / stream logs / detect readiness /
   stop), `discovery.py` (locate binaries, port checks, GGUF path resolution), `readiness.py`
   (HTTP `/health` + `/v1/models` probe).
@@ -127,6 +131,9 @@ gating (`screens/editor.py`); a setup detect/install entry (`screens/setup.py` +
 - **Voice (STT/TTS) behavior:** `chat/voice.py` (engines, model resolution, capture/playback);
   the mic / read-aloud buttons + workers in `screens/chat.py`; voice prefs on `AppSettings`
   (`config/models.py`); the install entry in `bootstrap.py` + `screens/setup.py`.
+- **HuggingFace search/download:** logic in `hf.py`; the browse screen `screens/hf_browse.py`; the
+  "Search HF" button + `_apply_hf_result` (format→engine) in `screens/editor.py`. The format→engine
+  map and the device-memory `fit` thresholds live in those two files.
 - **Install / run scripts:** `install.sh` / `run.sh` (macOS), `install-linux.sh` /
   `run-linux.sh`, `install-windows.ps1` / `run-windows.ps1`.
 

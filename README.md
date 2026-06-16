@@ -18,6 +18,11 @@ with them or wire them into Xcode 27. It drives four interchangeable backends:
 - **Drag & drop** a model folder onto the terminal (or paste a HuggingFace repo id). For
   **llama.cpp**, point at a `.gguf` file, its model folder (the right `.gguf` is picked
   automatically), or an HF repo — and a sibling vision projector (`mmproj`) loads on its own.
+- **Search HuggingFace & download** from the editor (the **Search HF** button): filter by
+  **GGUF** or **MLX** (MLX on Apple Silicon only), see a per-result **fit badge** against your
+  device's memory (it estimates whether a model fits your RAM/VRAM), and download with a live
+  progress log. Picking one sets the matching engine (GGUF → llama.cpp, MLX → an MLX engine) and
+  fills the model field; for GGUF you choose the quant file so only that one downloads.
 - Tweak options (temperature, max-tokens, top-p/k, prompt cache, …) plus a free-form
   **custom params** box for anything else (e.g. quantized-KV-cache flags on servers that
   support them).
