@@ -68,7 +68,6 @@ class MlxLauncherApp(App):
     /* chat */
     #chat-body { height: 1fr; }
     #chat-sidebar { width: 34; border-right: solid $panel; }
-    #chat-sidebar .section { color: $accent; text-style: bold; padding: 1 1 0 1; }
     #projects { height: 7; border: round $panel; }
     #chats { height: 1fr; border: round $panel; }
     #sidebar-buttons { height: auto; padding: 1 0 0 0; }

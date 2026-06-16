@@ -86,10 +86,6 @@ def voice_install_argv() -> list[str]:
     return [sys.executable, "-m", "pip", "install", "--upgrade", *voice_packages()]
 
 
-def pipx_inject_argv(package: str = "mlx-lm", into: str = "mlx-launcher") -> list[str]:
-    return ["pipx", "inject", into, package]
-
-
 # --- global install ------------------------------------------------------
 
 def pipx_available() -> bool:

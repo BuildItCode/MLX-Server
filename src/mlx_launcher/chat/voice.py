@@ -123,8 +123,6 @@ def ensure_threading_tqdm_lock() -> None:
     if _tqdm_lock_set:
         return
     try:
-        import threading
-
         import tqdm
         tqdm.tqdm.set_lock(threading.RLock())
         _tqdm_lock_set = True

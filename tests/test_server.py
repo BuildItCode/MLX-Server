@@ -1,7 +1,6 @@
 import socket
 
 from mlx_launcher.server import discovery
-from mlx_launcher.server.readiness import STARTING_RE
 
 
 def test_exit_message_unsupported_architecture():
@@ -70,11 +69,6 @@ def test_is_alive_is_false_without_a_process():
     from mlx_launcher.server.manager import ServerManager
 
     assert ServerManager(ServerConfig(model="/m")).is_alive() is False
-
-
-def test_readiness_regex():
-    m = STARTING_RE.search("Starting httpd at 127.0.0.1 on port 8080...")
-    assert m and m.group(1) == "8080"
 
 
 def test_is_port_free_true_for_unused_high_port():

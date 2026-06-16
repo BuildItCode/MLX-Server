@@ -3,19 +3,21 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import time
 from typing import Callable, Optional
 
 import httpx
 
-# mlx_lm.server logs this once the HTTP server is bound.
-STARTING_RE = re.compile(r"Starting httpd at .* on port (\d+)", re.IGNORECASE)
 
-
-async def probe_once(server_url: str, *, timeout: float = 2.0) -> bool:
-    """One readiness probe: /health, falling back to /v1/models."""
-    async with httpx.AsyncClient(timeout=timeout) as client:
+async def probe_once(
+    server_url: str, *, timeout: float = 2.0, client: Optional[httpx.AsyncClient] = None
+) -> bool:
+    """One readiness probe: /health, falling back to /v1/models. Reuses `client` when given
+    (the poll loop shares one), otherwise opens and closes its own."""
+    own = client is None
+    if own:
+        client = httpx.AsyncClient(timeout=timeout)
+    try:
         for path in ("/health", "/v1/models"):
             try:
                 resp = await client.get(server_url + path)
@@ -23,7 +25,10 @@ async def probe_once(server_url: str, *, timeout: float = 2.0) -> bool:
                     return True
             except Exception:
                 continue
-    return False
+        return False
+    finally:
+        if own:
+            await client.aclose()
 
 
 async def wait_until_ready(
@@ -37,10 +42,13 @@ async def wait_until_ready(
 
     `should_continue` lets the caller abort early (e.g. the process died)."""
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if should_continue is not None and not should_continue():
-            return False
-        if await probe_once(server_url):
-            return True
-        await asyncio.sleep(interval)
+    # one client for the whole poll loop — readiness can poll ~3×/s for minutes while a large
+    # model loads, so a fresh client (+ connection setup) per probe would be needless churn.
+    async with httpx.AsyncClient(timeout=2.0) as client:
+        while time.monotonic() < deadline:
+            if should_continue is not None and not should_continue():
+                return False
+            if await probe_once(server_url, client=client):
+                return True
+            await asyncio.sleep(interval)
     return False

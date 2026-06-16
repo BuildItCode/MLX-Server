@@ -1743,12 +1743,6 @@ class ChatScreen(Screen):
 
     # --- subagents (side chat) -------------------------------------------
 
-    @staticmethod
-    def _extract_text(data: dict) -> str:
-        msg = (data.get("choices") or [{}])[0].get("message") or {}
-        content, _ = parse_harmony(msg.get("content") or "")
-        return content
-
     def _subagent_system(self, sub: Subagent) -> str:
         parts = [p for p in (skills.instructions_for(sid) for sid in sub.skill_ids) if p]
         if sub.system_prompt.strip():
