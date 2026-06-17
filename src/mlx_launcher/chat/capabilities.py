@@ -60,12 +60,14 @@ REASONING_EFFORTS = (None, "off", "low", "medium", "high")
 def reasoning_template_kwargs(model: str, effort: str | None) -> dict:
     """Translate a reasoning-effort choice into the `chat_template_kwargs` the model's own
     chat template understands. Sent in the request body — mlx_lm.server / vLLM forward it to
-    `apply_chat_template`. Returns {} for 'auto' or a non-reasoning model.
+    `apply_chat_template`. Returns {} only for 'auto' (the model/template default).
 
+    An EXPLICIT effort is sent even when the name-based heuristic doesn't flag the model as a
+    reasoner — a kwarg a template doesn't reference is harmless (just unused Jinja context), and
+    this way reasoning models we don't recognize by name (e.g. Step) still respond to the control.
     gpt-oss uses a graded `reasoning_effort` (low|medium|high); Qwen3-style templates use an
-    `enable_thinking` bool. A kwarg a given template doesn't reference is harmless — it's just
-    unused Jinja context — so worst case the setting is silently a no-op for that model."""
-    if not effort or not supports_reasoning(model):
+    `enable_thinking` bool; everything else gets `reasoning_effort`."""
+    if not effort:
         return {}
     m = _norm(model)
     if "gpt-oss" in m or "gpt_oss" in m:

@@ -5,7 +5,7 @@ field is set (so the server's own defaults apply otherwise); `custom_params` is
 shell-split and appended verbatim.
 
 `mlx_lm.server` and `mlx_vlm.server` take *different* flag sets — passing an
-mlx-lm-only flag (e.g. `--temp`, `--max-tokens`, `--pipeline`) to mlx-vlm makes
+mlx-lm-only flag (e.g. `--prompt-cache-size`, `--pipeline`) to mlx-vlm makes
 its argparse abort. So the flag tables are gated per engine: mlx-vlm gets its own
 native quantized-KV-cache flags (`--kv-bits`, `--max-kv-size`, …); anything still
 without a field (e.g. `--enable-thinking`) rides through the Custom params box."""
@@ -29,12 +29,10 @@ _SHARED_VALUE_FLAGS: list[tuple[str, str]] = [
     ("log_level", "--log-level"),
 ]
 
-# Value-bearing flags accepted only by `mlx_lm.server`.
+# Value-bearing flags accepted only by `mlx_lm.server`. Sampling (temp/top_p/top_k/min_p) is NOT
+# here — it's sent per request in the chat body (see ChatScreen._sampling_of), so it applies to
+# every engine instead of only mlx-lm's launch defaults.
 _MLX_LM_VALUE_FLAGS: list[tuple[str, str]] = [
-    ("temp", "--temp"),
-    ("top_p", "--top-p"),
-    ("top_k", "--top-k"),
-    ("min_p", "--min-p"),
     ("prompt_cache_size", "--prompt-cache-size"),
     ("prompt_cache_bytes", "--prompt-cache-bytes"),
     ("allowed_origins", "--allowed-origins"),
@@ -138,14 +136,8 @@ def _llama_cpp_args(cfg: ServerConfig) -> list[str]:
         args += ["-t", str(cfg.n_threads)]
     if cfg.max_tokens:
         args += ["--n-predict", str(cfg.max_tokens)]
-    if cfg.temp is not None:
-        args += ["--temp", str(cfg.temp)]
-    if cfg.top_p is not None:
-        args += ["--top-p", str(cfg.top_p)]
-    if cfg.top_k is not None:
-        args += ["--top-k", str(cfg.top_k)]
-    if cfg.min_p is not None:
-        args += ["--min-p", str(cfg.min_p)]
+    # sampling (temp/top_p/top_k/min_p) is sent per request in the chat body, not as launch
+    # flags — see ChatScreen._sampling_of — so it works the same across every engine.
     if cfg.cache_type_k:
         args += ["--cache-type-k", cfg.cache_type_k]
     if cfg.cache_type_v:

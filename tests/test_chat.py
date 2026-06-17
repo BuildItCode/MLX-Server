@@ -276,6 +276,21 @@ def test_scaled_max_tokens(monkeypatch):
     assert cl.scaled_max_tokens("m") == cl.DEFAULT_MAX_TOKENS
 
 
+def test_tool_phrase_is_natural_language():
+    from mlx_launcher.screens.chat import _tool_phrase
+
+    assert _tool_phrase("read_file", {"path": "src/app.py"}) == "Reading src/app.py"
+    assert _tool_phrase("write_file", {"path": "a.py"}) == "Writing a.py"
+    assert _tool_phrase("edit_file", {"path": "a.py"}) == "Editing a.py"
+    assert _tool_phrase("list_directory", {}) == "Listing ."
+    assert _tool_phrase("delete_path", {"path": "x"}) == "Deleting x"
+    assert _tool_phrase("run_command", {"command": "pytest -q"}).startswith("Running")
+    assert _tool_phrase("web_search", {"query": "vllm"}).startswith("Searching the web")
+    assert _tool_phrase("read_file", {}) == "Reading a file"          # missing arg → graceful
+    # MCP / unknown tool → humanized identifier, never raw snake_case
+    assert _tool_phrase("github_create_issue", {}) == "Github create issue"
+
+
 def test_safe_content_survives_markup_breaking_text():
     import pytest
     from textual.content import Content
@@ -356,6 +371,54 @@ def test_chat_requests_a_real_token_budget(monkeypatch):
     captured.clear()
     asyncio.run(MlxBridge("http://x/v1", "m").chat([{"role": "user", "content": "hi"}]))
     assert "max_tokens" not in captured
+
+
+def test_sampling_sent_per_request_for_every_engine(monkeypatch):
+    # Sampling is sent in the chat body (works on any OpenAI-compatible engine), not as mlx-lm-only
+    # launch flags — so temperature etc. apply regardless of engine.
+    import asyncio
+
+    import mlx_launcher.acp.bridge as bridge_mod
+    from mlx_launcher.acp.bridge import MlxBridge
+    from mlx_launcher.config.models import ServerConfig
+    from mlx_launcher.screens.chat import ChatScreen
+
+    # a profile's fields → OpenAI request params, only what the user set
+    cfg = ServerConfig(model="/m", temp=0.7, top_p=0.9, top_k=40)  # min_p left unset
+    assert ChatScreen._sampling_of(cfg) == {"temperature": 0.7, "top_p": 0.9, "top_k": 40}
+    assert ChatScreen._sampling_of(ServerConfig(model="/m")) == {}  # nothing set → nothing sent
+    assert ChatScreen._sampling_of(None) == {}
+
+    captured = {}
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            captured.update(json)
+            return FakeResp()
+
+    monkeypatch.setattr(bridge_mod.httpx, "AsyncClient", FakeClient)
+    asyncio.run(MlxBridge("http://x/v1", "m", sampling={"temperature": 0.7, "top_p": 0.9}).chat(
+        [{"role": "user", "content": "hi"}]))
+    assert captured["temperature"] == 0.7 and captured["top_p"] == 0.9
+
+    captured.clear()  # no sampling → key omitted entirely
+    asyncio.run(MlxBridge("http://x/v1", "m").chat([{"role": "user", "content": "hi"}]))
+    assert "temperature" not in captured
 
 
 def test_port_occupants_excludes_main_on_a_different_port(monkeypatch):
@@ -521,11 +584,11 @@ def test_editor_gates_fields_by_engine():
 
     from mlx_launcher.screens.editor import EditorScreen, _MANUAL_GROUP_ENGINES
 
-    manual_shown = {
+    manual_shown = {  # grp-sampling now shows for every engine (sent per request, not a launch flag)
         "mlx-lm": {"grp-sampling", "grp-shared-adv", "grp-mlxlm-adv"},
-        "mlx-vlm": {"grp-shared-adv", "grp-kv-extra", "grp-kv-mlxvlm"},
-        "vllm-mlx": {"grp-kv-extra", "grp-vllm"},
-        "llama-cpp": {"grp-llamacpp"},
+        "mlx-vlm": {"grp-sampling", "grp-shared-adv", "grp-kv-extra", "grp-kv-mlxvlm"},
+        "vllm-mlx": {"grp-sampling", "grp-kv-extra", "grp-vllm"},
+        "llama-cpp": {"grp-sampling", "grp-llamacpp"},
     }
     disabled = {  # which visible KV/option fields are greyed out per engine
         "mlx-lm": {"kv_bits": True, "max_kv_size": True, "turboquant": True, "draft_model": False},
@@ -991,6 +1054,53 @@ def test_slash_command_menu(monkeypatch, tmp_path):
             assert scr.chat.mode == "plan"            # the command ran
             assert sug.display is False               # menu closed
             assert prompt.text == ""                  # prompt cleared, nothing sent
+
+    asyncio.run(go())
+
+
+def test_empty_final_channel_falls_back_to_reasoning(monkeypatch, tmp_path):
+    # gpt-oss sometimes puts its post-tool summary in the ANALYSIS channel, leaving the `final`
+    # channel empty. After real tool work that must surface as the answer, not "(no answer)".
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    import asyncio
+
+    import mlx_launcher.chat.tools as chat_tools
+    from mlx_launcher.app import MlxLauncherApp
+    from mlx_launcher.chat.models import ChatMessage
+    from mlx_launcher.screens.chat import ChatScreen  # noqa: F401
+
+    async def fake_ws(q, max_results=6):
+        return "a result"
+
+    monkeypatch.setattr(chat_tools, "run_web_search", fake_ws)
+
+    async def go():
+        app = MlxLauncherApp()
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause(0.2)
+            await app.push_screen(ChatScreen())
+            await pilot.pause(0.3)
+            scr = app.screen
+            scr.chat.web_search = True
+            scr.chat.base_url = "http://x/v1"
+            scr.chat.model = "gpt-oss-20b"
+            scr.chat.messages.append(ChatMessage(role="user", text="check for issues"))
+            responses = [
+                # 1: a Harmony commentary tool call
+                {"choices": [{"message": {"content":
+                    '<|channel|>commentary to=functions.web_search<|message|>{"query":"x"}<|call|>'}}]},
+                # 2: finishes — but the summary is in `analysis`, the final channel is empty
+                {"choices": [{"message": {"content":
+                    "<|channel|>analysis<|message|>Found 2 issues: A and B<|end|>"}}]},
+            ]
+
+            async def fake_bridge(client, messages, specs, *, cancel=None):
+                return responses.pop(0)
+
+            scr._bridge_chat = fake_bridge
+            await scr._generate_tools()
+            assert "Found 2 issues" in scr.chat.messages[-1].text
+            assert scr.chat.messages[-1].text != "(no answer)"
 
     asyncio.run(go())
 
@@ -1504,10 +1614,13 @@ def test_reasoning_template_kwargs_maps_per_model_family():
     # Qwen3 → enable_thinking bool (on for any level, off disables thinking)
     assert cap.reasoning_template_kwargs("Qwen3-8B", "medium") == {"enable_thinking": True}
     assert cap.reasoning_template_kwargs("Qwen3-8B", "off") == {"enable_thinking": False}
-    # 'auto' (None) sends nothing; a non-reasoning model sends nothing
+    # 'auto' (None) sends nothing
     assert cap.reasoning_template_kwargs("gpt-oss-20b", None) == {}
-    assert cap.reasoning_template_kwargs("llama-3-8b-instruct", "high") == {}
-    # other reasoning families get a best-effort effort hint (ignored if unsupported)
+    # an EXPLICIT effort is sent even for a model the heuristic doesn't flag — harmless if the
+    # template ignores it, and it lets unrecognized reasoners (e.g. Step) respond to the control
+    assert cap.reasoning_template_kwargs("llama-3-8b-instruct", "high") == {"reasoning_effort": "high"}
+    assert cap.reasoning_template_kwargs("step-3.7", "medium") == {"reasoning_effort": "medium"}
+    # other reasoning families get a best-effort effort hint
     assert cap.reasoning_template_kwargs("deepseek-r1-distill-qwen", "medium") == {"reasoning_effort": "medium"}
     # gpt-oss is now recognized as a reasoning model (so the chip shows for it)
     assert cap.supports_reasoning("openai/gpt-oss-20b") is True
@@ -1771,11 +1884,12 @@ def test_effort_chip_renders_and_hides_for_non_reasoning_models(tmp_path, monkey
             await pilot.pause()
             assert scr.chat.reasoning_effort == "off" and chip.has_class("-on")  # set → lit
 
-            # a non-reasoning model → chip hides itself
+            # a model the heuristic doesn't flag as a reasoner → chip stays available (clickable),
+            # since the user may want reasoning on a model we don't recognize by name (e.g. Step)
             scr.chat.model = "llama-3-8b-instruct"
             scr._sync_effort_chip()
             await pilot.pause()
-            assert chip.has_class("hidden")
+            assert not chip.has_class("hidden")
 
     asyncio.run(go())
 

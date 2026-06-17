@@ -472,9 +472,11 @@ class ChatClient:
     def __init__(
         self, base_url: str, model: str, api_key: str = "not-needed",
         max_tokens: int = DEFAULT_MAX_TOKENS, chat_template_kwargs: Optional[dict] = None,
+        sampling: Optional[dict] = None,
     ) -> None:
         self.bridge = MlxBridge(
-            base_url, model, api_key, max_tokens=max_tokens, chat_template_kwargs=chat_template_kwargs
+            base_url, model, api_key, max_tokens=max_tokens,
+            chat_template_kwargs=chat_template_kwargs, sampling=sampling,
         )
 
     async def stream(

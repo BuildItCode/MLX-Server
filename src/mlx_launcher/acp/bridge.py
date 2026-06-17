@@ -75,6 +75,7 @@ class MlxBridge:
     def __init__(
         self, base_url: str, model: str, api_key: str = "not-needed",
         max_tokens: Optional[int] = None, chat_template_kwargs: Optional[dict] = None,
+        sampling: Optional[dict] = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -85,6 +86,9 @@ class MlxBridge:
         # extra kwargs forwarded to the server's apply_chat_template (e.g. gpt-oss
         # reasoning_effort, Qwen3 enable_thinking). Omitted from the payload when empty.
         self.chat_template_kwargs = chat_template_kwargs or None
+        # per-request sampling (temperature/top_p/top_k/min_p) sent on every call — works for
+        # every OpenAI-compatible engine, unlike server-launch flags. Omitted when empty.
+        self.sampling = sampling or None
 
     @property
     def _headers(self) -> dict:
@@ -105,6 +109,8 @@ class MlxBridge:
             payload["max_tokens"] = self.max_tokens
         if self.chat_template_kwargs:
             payload["chat_template_kwargs"] = self.chat_template_kwargs
+        if self.sampling:
+            payload.update(self.sampling)
         timeout = httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0)
         finish = "stop"
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -159,6 +165,8 @@ class MlxBridge:
             payload["max_tokens"] = self.max_tokens
         if self.chat_template_kwargs:
             payload["chat_template_kwargs"] = self.chat_template_kwargs
+        if self.sampling:
+            payload.update(self.sampling)
         timeout = httpx.Timeout(connect=10.0, read=read_timeout, write=30.0, pool=10.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=payload, headers=self._headers)

@@ -209,6 +209,34 @@ def _perm_prompt(name: str, args: dict) -> tuple[str, str]:
     return name, json.dumps(args)[:500]
 
 
+def _tool_phrase(name: str, args: dict) -> str:
+    """A natural-language description of a tool call for the transcript — 'Reading src/app.py'
+    instead of 'read_file'. Falls back to a humanized identifier for MCP / unknown tools."""
+    a = args or {}
+    path = str(a.get("path") or "").strip()
+    if name == "read_file":
+        return f"Reading {path}" if path else "Reading a file"
+    if name == "write_file":
+        return f"Writing {path}" if path else "Writing a file"
+    if name == "edit_file":
+        return f"Editing {path}" if path else "Editing a file"
+    if name == "list_directory":
+        return f"Listing {path or '.'}"
+    if name == "delete_path":
+        return f"Deleting {path}" if path else "Deleting a path"
+    if name == "run_command":
+        cmd = str(a.get("command") or "").strip()
+        return f"Running  {cmd[:60]}" if cmd else "Running a command"
+    if name == "open_in_browser":
+        target = str(a.get("path") or a.get("url") or "").strip()
+        return f"Opening {target}" if target else "Opening in the browser"
+    if name == "web_search":
+        query = str(a.get("query") or "").strip()
+        return f"Searching the web for “{query}”" if query else "Searching the web"
+    label = (name or "").replace("_", " ").replace("-", " ").strip() or "a tool"  # MCP / unknown
+    return label[:1].upper() + label[1:]
+
+
 class PermissionModal(ModalScreen[str]):
     """Ask the user to allow a mutating file/command operation.
     Returns 'once' | 'all' | 'deny'."""
@@ -818,7 +846,7 @@ class ChatScreen(Screen):
                       else scaled_max_tokens(self.chat.model, self._context_cap_of(cfg)))
         ctk = capabilities.reasoning_template_kwargs(self.chat.model, self.chat.reasoning_effort)
         return ChatClient(self.chat.base_url, self.chat.model, max_tokens=max_tokens,
-                          chat_template_kwargs=ctk or None)
+                          chat_template_kwargs=ctk or None, sampling=self._sampling_of(cfg) or None)
 
     def _server_label_for(self, chat: Optional[Chat]) -> str:
         """The user-given profile name for a chat's server (falls back to the model)."""
@@ -861,22 +889,24 @@ class ChatScreen(Screen):
         self.query_one("#prompt", PromptArea).focus()
 
     def _sync_reasoning_switch(self) -> None:
+        # Always togglable. The name heuristic only sets the DEFAULT (when the model/server
+        # changes); the user can turn thinking on for ANY model — including reasoners we don't
+        # recognize by name (e.g. Step) — so we never lock the control.
         chip = self.query_one("#chip-reasoning", ToggleChip)
-        supported = bool(self.chat and capabilities.supports_reasoning(self.chat.model))
-        chip.set_enabled(supported)
-        chip.set_value(bool(self.chat and self.chat.reasoning and supported))
+        chip.set_enabled(True)
+        chip.set_value(bool(self.chat and self.chat.reasoning))
         self._sync_effort_chip()
 
     _EFFORT_CYCLE = (None, "off", "low", "medium", "high")
 
     def _sync_effort_chip(self) -> None:
-        """Reflect the reasoning-effort level; the chip shows only for reasoning models."""
+        """Reflect the reasoning-effort level. Always shown/clickable — an explicit effort is sent
+        regardless of the name heuristic, so unrecognized reasoning models still respond."""
         try:
             chip = self.query_one("#chip-effort", Static)
         except Exception:  # noqa: BLE001 — not mounted yet
             return
-        supported = bool(self.chat and capabilities.supports_reasoning(self.chat.model))
-        chip.set_class(not supported, "hidden")
+        chip.set_class(False, "hidden")  # never gated off — the heuristic only chooses the default
         effort = self.chat.reasoning_effort if self.chat else None
         chip.update(f"effort: {effort or 'auto'}")
         chip.set_class(bool(effort), "-on")
@@ -959,6 +989,24 @@ class ChatScreen(Screen):
         if engine == "llama-cpp":
             return cfg.ctx or None
         return None
+
+    @staticmethod
+    def _sampling_of(cfg) -> dict:
+        """A profile's sampling settings as OpenAI request params, sent on every request for the
+        model — engine-independent (every OpenAI-compatible server reads them from the body),
+        unlike the old per-engine launch flags. Only includes values the user actually set."""
+        out: dict = {}
+        if cfg is None:
+            return out
+        if cfg.temp is not None:
+            out["temperature"] = cfg.temp
+        if cfg.top_p is not None:
+            out["top_p"] = cfg.top_p
+        if cfg.top_k is not None:
+            out["top_k"] = cfg.top_k
+        if cfg.min_p is not None:
+            out["min_p"] = cfg.min_p
+        return out
 
     def _effective_context(self) -> Optional[int]:
         """The context budget to meter against: the profile's configured cap (bounded by the
@@ -1063,22 +1111,19 @@ class ChatScreen(Screen):
         return c
 
     def _tool_call_widgets(self, calls: list[dict]) -> list:
-        """Compact dim lines naming the tool calls an assistant turn made — for reloaded
+        """Compact lines describing the tool calls an assistant turn made — for reloaded
         transcripts (live turns show richer per-call bubbles via _exec_tool)."""
         out: list = []
         for c in calls or []:
-            args = json.dumps(c.get("arguments") or {})
-            if len(args) > 80:
-                args = args[:80] + " …"
-            out.append(Static(Content.assemble(("▸ " + (c.get("name") or "tool"), "bold"), "  ", (args, "dim")),
-                              classes="msg-stats"))
+            phrase = _tool_phrase(c.get("name") or "", c.get("arguments") or {})
+            out.append(Static(Content.assemble(("▸ ", "dim"), (phrase, "")), classes="msg-stats"))
         return out
 
     def _message_widget(self, m: ChatMessage) -> Horizontal:
         if m.role == "tool":  # a persisted tool result — same compact bubble as the live one
             preview = m.text if len(m.text) <= 500 else m.text[:500] + " …"
-            row, _ = self._bubble("▸ tool", "msg-tool",
-                                  Content.assemble((m.tool_name or "tool", "bold"), "\n", (preview, "dim")))
+            row, _ = self._bubble("▸", "msg-tool",
+                                  Content.assemble((_tool_phrase(m.tool_name or "", {}), "bold"), "\n", (preview, "dim")))
             return row
         if m.role == "assistant":
             has_text = bool((m.text or "").strip())
@@ -2104,7 +2149,8 @@ class ChatScreen(Screen):
         transcript = self.query_one("#side-transcript", VerticalScroll)
         client = ChatClient(cfg.base_url(), cfg.model,
                             max_tokens=(sub.max_tokens or cfg.max_tokens
-                                        or scaled_max_tokens(cfg.model, self._context_cap_of(cfg))))
+                                        or scaled_max_tokens(cfg.model, self._context_cap_of(cfg))),
+                            sampling=self._sampling_of(cfg) or None)
         cancel = self._cancel_cb("side")
         self._set_generating("side", True)
         try:
@@ -2511,7 +2557,10 @@ class ChatScreen(Screen):
                     choice = (data.get("choices") or [{}])[0]
                     ext = extract_tool_calls(choice.get("message") or {}, choice.get("finish_reason"), tool_names)
                     if not ext.calls:  # a final answer — or a truncated turn we should continue
-                        clean = prompted_tools.strip_tool_calls(ext.content) or ext.content
+                        # fall back to the reasoning channel: gpt-oss often puts its post-tool
+                        # summary in `analysis`, leaving the `final` channel (content) empty —
+                        # showing that beats "(no answer)".
+                        clean = prompted_tools.strip_tool_calls(ext.content) or ext.content or ext.reason
                         if self._continue_if_truncated(messages, clean, ext.finish):
                             final_text += clean
                             truncating = True
@@ -2539,8 +2588,8 @@ class ChatScreen(Screen):
                             pass
                         thinking = None
                 if data:
-                    content, _ = parse_harmony((data.get("choices") or [{}])[0].get("message", {}).get("content") or "")
-                    final_text = prompted_tools.strip_tool_calls(content) or content
+                    content, reason = parse_harmony((data.get("choices") or [{}])[0].get("message", {}).get("content") or "")
+                    final_text = prompted_tools.strip_tool_calls(content) or content or reason
         except Exception as exc:  # noqa: BLE001
             final_text = f"▲ {exc}"
         if thinking is not None:  # never leave a spinner spinning
@@ -2570,8 +2619,8 @@ class ChatScreen(Screen):
         self._maybe_autoread()
 
     async def _exec_tool(self, name: str, args: dict, sessions: dict, router: dict, transcript, fs_root: Optional[str] = None) -> str:
-        row, body = self._bubble("▸ tool", "msg-tool",
-                                 Content.assemble((name, "bold"), "  ", (json.dumps(args)[:80], "dim")))
+        phrase = _tool_phrase(name, args)
+        row, body = self._bubble("▸", "msg-tool", Content.assemble((phrase, "bold")))
         await transcript.mount(row)
         self._scroll_end()
         try:
@@ -2585,7 +2634,7 @@ class ChatScreen(Screen):
                     if decision == "all":
                         self._auto_approve_fs = True
                     elif decision != "once":
-                        body.update(Content.assemble((name, "bold"), "\n", ("✕ denied by the user", "#e06c75")))
+                        body.update(Content.assemble((phrase, "bold"), "\n", ("✕ denied by the user", "#e06c75")))
                         return "The user DENIED this action. Do not retry it; ask how to proceed."
                 if name == "open_in_browser":
                     # must run on the UI thread (App.open_url), unlike the threaded fs ops
@@ -2599,7 +2648,7 @@ class ChatScreen(Screen):
         except Exception as exc:  # noqa: BLE001
             result = f"tool error: {exc}"
         preview = result if len(result) <= 500 else result[:500] + " …"
-        body.update(Content.assemble((name, "bold"), "\n", (preview, "dim")))
+        body.update(Content.assemble((phrase, "bold"), "\n", (preview, "dim")))
         return result
 
     def _open_in_browser(self, fs_root: str, args: dict) -> str:

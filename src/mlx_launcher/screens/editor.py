@@ -65,7 +65,7 @@ _KV_HINTS = {
 # profile only exposes flags the chosen server actually accepts. (Emission is
 # gated in flags.py too; this just cuts UI clutter.)
 _MANUAL_GROUP_ENGINES: dict[str, set[str]] = {
-    "grp-sampling": {"mlx-lm"},                  # server-level sampling defaults
+    "grp-sampling": {"mlx-lm", "mlx-vlm", "vllm-mlx", "llama-cpp"},  # sent per request, all engines
     "grp-shared-adv": {"mlx-lm", "mlx-vlm"},     # adapter / prefill / log level
     "grp-mlxlm-adv": {"mlx-lm"},                 # prompt cache, templates, concurrency
     "grp-kv-extra": {"mlx-vlm", "vllm-mlx"},     # KV group size
@@ -164,7 +164,7 @@ class EditorScreen(Screen):
                     yield Label("trust remote code")
 
                 with Vertical(id="grp-sampling"):
-                    yield Label("Sampling — mlx-lm", classes="hint")
+                    yield Label("Sampling — sent with every request (all engines)", classes="hint")
                     with Horizontal(classes="row"):
                         with Vertical(classes="col"):
                             yield Label("Temperature")

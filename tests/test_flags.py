@@ -14,7 +14,7 @@ def test_unset_optional_flags_are_omitted():
 def test_set_values_are_emitted():
     c = ServerConfig(model="/m", temp=0.7, max_tokens=2048, prompt_cache_bytes="2GB")
     args = build_args(c)
-    assert args[args.index("--temp") + 1] == "0.7"
+    assert "--temp" not in args  # sampling is sent per request now, not as a launch flag
     assert args[args.index("--max-tokens") + 1] == "2048"
     assert args[args.index("--prompt-cache-bytes") + 1] == "2GB"
 
@@ -145,6 +145,7 @@ def test_llama_cpp_builds_native_flags():
     assert a[a.index("--flash-attn") + 1] == "on"          # a VALUE, not a bare flag
     assert "--no-cont-batching" in a                       # continuous_batching=False (default on)
     assert "--jinja" in a
+    assert "--temp" not in a                               # sampling is sent per request, not at launch
 
 
 def test_llama_cpp_hf_repo_vs_local_path():
