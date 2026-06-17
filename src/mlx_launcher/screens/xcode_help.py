@@ -9,7 +9,7 @@ from textual.content import Content
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Static
 
-from ..config.models import ServerConfig
+from ..models import ServerConfig
 from ..xcode import helpers
 
 
@@ -35,12 +35,14 @@ class XcodeHelpScreen(Screen):
             yield Static("[dim]Press t to test the provider endpoint.[/]", id="test-result")
         yield Footer()
 
-    def on_mount(self) -> None:
-        # Persist the profile so `mlx-acp-agent --config-id` can resolve it at launch.
-        from ..config import store
-
-        store.upsert_server(self.app.config, self.cfg)
-        self.app.save_config()
+    async def on_mount(self) -> None:
+        # Persist the profile (via the backend) so `mlx-acp-agent --config-id` resolves it at launch.
+        try:
+            client = await self.app.backend()
+            await client.upsert_server(self.cfg.model_dump())
+            await self.app.refresh_config()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _provider_block(self) -> Content:
         p = helpers.openai_provider(self.cfg)
@@ -80,12 +82,14 @@ class XcodeHelpScreen(Screen):
         self.run_worker(self._test(), exclusive=True)
 
     async def _test(self) -> None:
-        from ..acp.bridge import fetch_models
-
         result = self.query_one("#test-result", Static)
         result.update("[dim]testing GET /v1/models …[/]")
         try:
-            models = await fetch_models(self.cfg.base_url())
+            client = await self.app.backend()
+            resp = await client.server_models(self.cfg.id)
+            if resp.get("error"):
+                raise RuntimeError(resp["error"])
+            models = resp.get("models") or []
             listed = ", ".join(models) if models else "(no models reported)"
             result.update(Content.assemble(("✓ /v1/models → ", "#7fb069"), listed))
         except Exception as exc:  # noqa: BLE001

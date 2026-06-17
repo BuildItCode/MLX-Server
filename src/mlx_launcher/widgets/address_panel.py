@@ -6,8 +6,7 @@ from rich.markup import escape
 from textual.content import Content
 from textual.widgets import Static
 
-from ..config.models import ServerConfig
-from ..server.manager import ServerStatus
+from ..models import ServerConfig
 from ..theme import STATUS_BADGE
 
 
@@ -21,13 +20,13 @@ class AddressPanel(Static):
     }
     """
 
-    def show(self, status: ServerStatus, cfg: ServerConfig, message: str = "") -> None:
-        glyph, color = STATUS_BADGE.get(status.value, ("○", "#8a8a8a"))
-        head = f"[{color}]{glyph} {status.value.upper()}[/]"
+    def show(self, status: str, cfg: ServerConfig, message: str = "") -> None:
+        glyph, color = STATUS_BADGE.get(status, ("○", "#8a8a8a"))
+        head = f"[{color}]{glyph} {status.upper()}[/]"
         if message:
             head += f"   [dim]{escape(message)}[/]"
         lines = [head]
-        if status in (ServerStatus.STARTING, ServerStatus.READY):
+        if status in ("starting", "ready"):
             lines += [
                 "",
                 f"  server   [b]{escape(cfg.server_url())}[/]",

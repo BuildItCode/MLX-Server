@@ -18,7 +18,23 @@ function Find-Python {
   return $null
 }
 
-if (-not (Test-Path $Venv)) {
+$vpy = Join-Path $Venv "Scripts\python.exe"
+
+# Recreate the venv if missing, broken, or MOVED. Its Python won't run if the base interpreter
+# moved; and venvs aren't relocatable — if .venv was created in another folder and renamed/copied
+# here, its Activate.ps1 + console-script shebangs point at the old path. Activate.ps1 always names
+# its own dir, so if it no longer mentions THIS .venv, it moved.
+$venvOk = Test-Path $vpy
+if ($venvOk) {
+  try { & $vpy -c "" 2>$null; if ($LASTEXITCODE -ne 0) { $venvOk = $false } } catch { $venvOk = $false }
+}
+$activate = Join-Path $Venv "Scripts\Activate.ps1"
+if ($venvOk -and (Test-Path $activate) -and -not (Select-String -SimpleMatch -Quiet -Path $activate -Pattern $Venv)) {
+  Write-Host "The .venv was created in a different folder and moved here - recreating it ..."
+  $venvOk = $false
+}
+if (-not $venvOk) {
+  if (Test-Path $Venv) { Remove-Item -Recurse -Force $Venv }
   $Py = Find-Python
   if (-not $Py) { Write-Error "No suitable Python found (need 3.10-3.14). Install from python.org."; exit 1 }
   $parts = $Py.Split(" ")
@@ -26,9 +42,9 @@ if (-not (Test-Path $Venv)) {
   & $parts[0] @($parts[1..($parts.Length - 1)]) -m venv $Venv
 }
 
-$vpy = Join-Path $Venv "Scripts\python.exe"
-$lis = Join-Path $Venv "Scripts\lis-start.exe"
-if ($Reinstall -or -not (Test-Path $lis)) {
+# Gate on lis-backend (the newer entry point) so an older install reinstalls + gets its new deps.
+$backend = Join-Path $Venv "Scripts\lis-backend.exe"
+if ($Reinstall -or -not (Test-Path $backend)) {
   Write-Host "Installing dependencies (this runs only when needed) ..."
   & $vpy -m pip install --quiet --upgrade pip
   & $vpy -m pip install --quiet -e $Here
@@ -38,4 +54,6 @@ if (-not (Get-Command llama-server -ErrorAction SilentlyContinue)) {
   Write-Host "NOTE: llama-server not found - run .\install-windows.ps1 or install llama.cpp first."
 }
 
-& $lis @args
+# Launch the TUI (lis-start) — NOT lis-backend, which is only the dependency-gate sentinel above.
+$start = Join-Path $Venv "Scripts\lis-start.exe"
+& $start @args

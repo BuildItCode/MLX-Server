@@ -11,6 +11,43 @@ with them, and wires them into Xcode 27. It is a thin, local-first **orchestrato
 not run inference itself. It spawns an OpenAI-compatible **model server** as a subprocess and
 talks HTTP to it.
 
+### Architecture: format engine → backend → frontend
+
+The codebase is layered so each tier is independently replaceable, with dependencies pointing only
+inward (enforced by `tests/test_architecture.py`):
+
+- **`models/`** — shared pydantic DTOs (the leaf; depends on nothing).
+- **`engine/`** — the **format engine**: an OpenAI-compatible adapter (`OpenAIEngine` behind the
+  `Engine` protocol) plus all format‑quirk handling (Harmony / `<think>` parsing, tool‑call
+  extraction in every dialect, the prompted‑protocol fallback, model‑capability heuristics).
+  Swap the model server via `base_url`; depends only on `models/`.
+- **`core/`** — the **backend**: the *one* unified agent loop (`core/agent.py:AgentRunner`, which
+  replaced the three copies that used to live in the frontends), sessions, tool execution
+  (web/fs/MCP), token budgeting + compaction, persistence (single‑writer `mutate()`), the
+  model‑server supervisor, and a local **HTTP + SSE service** (`core/service.py`, run via
+  `lis-backend`). Depends only on `engine/` + `models/`; never imports a frontend.
+- **`client/`** — the thin REST + SSE wire client (`BackendClient`) both frontends use to drive the
+  backend; reaches it over the documented contract only (never imports `engine`/`core`).
+- **frontends** — the Textual TUI (`screens/`, `app.py`) and the ACP agent (`acp/`). The TUI's
+  chat generates over HTTP+SSE against `lis-backend`; the ACP agent and the TUI subagent pane drive
+  `AgentRunner` directly. Old import paths (`chat/*`, `config/*`, `server/*`) remain as thin
+  re-export **shims** over the new layers, so existing imports keep working.
+
+A third console script, **`lis-backend`** (`mlx_launcher.core.server_main:main`), runs the service
+on an ephemeral `127.0.0.1` port and writes `~/.config/mlx-launcher/backend.json`
+(`{pid, port, token}`) for discovery; the TUI spawns/discovers it lazily on the first chat run.
+
+**What runs over the wire vs. locally.** All agent logic + inference is over the wire: the TUI's
+main chat and `/compact` drive `lis-backend` (the backend owns the loop, tools, permissions,
+persistence, and the OpenAI engine). The Xcode ACP agent and the TUI subagent side-pane drive the
+same `core.AgentRunner` **in-process** (they are embedded backend-drivers, not pure wire clients).
+The config/launcher screens (dashboard, editor, MCP/skills/project/subagent managers) and the
+model-server launch flow (`running.py`, the chat server-switch) read/write the **shared on-disk
+store** and use a **local `ServerManager`** — deliberately, since both the TUI and the backend open
+the same `~/.config/mlx-launcher/` files and the backend already mirrors the same resource +
+model-server lifecycle over its REST/SSE API (`/servers/*`, `/projects`, …) for *other* frontends.
+A non-TUI frontend uses only the wire API; the bundled TUI shares the local store for its config UIs.
+
 - **Stack:** Python 3.10–3.14, [Textual](https://textual.textualize.io) (TUI), httpx,
   pydantic v2, and the `mcp`, `ddgs`, `pypdf`, and `agent-client-protocol` (`acp`) libraries.
 - **Entry points** (`pyproject.toml` `[project.scripts]`): `lis-start`

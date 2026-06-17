@@ -84,7 +84,7 @@ VENV="$HERE/.venv"
 
 BIN="$HOME/.local/bin"
 mkdir -p "$BIN"
-for cmd in lis-start mlx-acp-agent; do
+for cmd in lis-start lis-backend mlx-acp-agent; do
   ln -sf "$VENV/bin/$cmd" "$BIN/$cmd"
   echo "  linked $BIN/$cmd"
 done

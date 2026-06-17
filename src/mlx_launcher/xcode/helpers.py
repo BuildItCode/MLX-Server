@@ -12,7 +12,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
-from ..config.models import ServerConfig
+from ..models import ServerConfig
 
 XCODE_DOCS_URL = "https://developer.apple.com/documentation/xcode/setting-up-coding-intelligence"
 PLACEHOLDER_API_KEY = "not-needed"

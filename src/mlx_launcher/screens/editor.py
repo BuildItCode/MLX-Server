@@ -35,9 +35,9 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 
 from .. import hf
-from ..config import flags, store
-from ..config.models import ServerConfig
-from ..server import discovery
+from ..config import flags  # pure CLI-preview builder (display only)
+from ..models import ServerConfig
+from ..server import discovery  # pure GGUF path resolution (display only)
 from ..widgets.path_input import DropPathInput, PathInput, path_hint, resolve_path, sanitize_drag
 
 _LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
@@ -469,15 +469,20 @@ class EditorScreen(Screen):
             kwargs["id"] = self.server.id
         return ServerConfig(**kwargs)
 
-    def _save(self) -> Optional[ServerConfig]:
+    async def _save(self) -> Optional[ServerConfig]:
         try:
             cfg = self._collect()
         except ValueError as exc:
             self.notify(str(exc), severity="error")
             return None
-        store.upsert_server(self.app.config, cfg)
-        self.app.config.settings.last_used_id = cfg.id
-        self.app.save_config()
+        try:
+            client = await self.app.backend()
+            await client.upsert_server(cfg.model_dump())
+            await client.patch_settings({"last_used_id": cfg.id})
+            await self.app.refresh_config()
+        except Exception as exc:  # noqa: BLE001
+            self.notify(f"Save failed: {exc}", severity="error")
+            return None
         return cfg
 
     # --- events ----------------------------------------------------------
@@ -539,14 +544,14 @@ class EditorScreen(Screen):
         self.query_one("#cmd-preview", Label).update(Content(f"$ {preview}"))
 
     @on(Button.Pressed, "#save")
-    def _on_save(self) -> None:
-        if self._save() is not None:
+    async def _on_save(self) -> None:
+        if await self._save() is not None:
             self.notify("Saved")
             self.app.pop_screen()
 
     @on(Button.Pressed, "#save_launch")
-    def _on_save_launch(self) -> None:
-        cfg = self._save()
+    async def _on_save_launch(self) -> None:
+        cfg = await self._save()
         if cfg is not None:
             from .running import RunningScreen
 
@@ -563,8 +568,8 @@ class EditorScreen(Screen):
             return
         self.app.pop_screen()
 
-    def action_save(self) -> None:
-        if self._save() is not None:
+    async def action_save(self) -> None:
+        if await self._save() is not None:
             self.notify("Saved")
             self.app.pop_screen()
 

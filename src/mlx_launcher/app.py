@@ -12,9 +12,7 @@ from typing import Optional
 from textual.app import App
 from textual.binding import Binding
 
-from .config import store
-from .config.models import ConfigFile, ServerConfig
-from .server.manager import ServerManager
+from .models import AppSettings, ConfigFile, ServerConfig
 from .theme import MLX_THEME
 
 
@@ -228,20 +226,51 @@ class MlxLauncherApp(App):
 
     def __init__(self) -> None:
         super().__init__()
-        self.config: ConfigFile = store.load()
-        self._managers: dict[str, ServerManager] = {}
+        self.config: ConfigFile = ConfigFile()  # in-memory cache; populated from the backend on mount
+        self._backend = None  # connected/spawned BackendClient (see backend())
+        self._backend_lock = None
+
+    async def backend(self):
+        """The wire client for the local backend service, connecting to a running one or spawning
+        ``lis-backend`` on first use. The frontend reaches the backend ONLY through this client."""
+        import asyncio as _asyncio
+
+        from .client import connect
+
+        if self._backend_lock is None:
+            self._backend_lock = _asyncio.Lock()
+        async with self._backend_lock:
+            if self._backend is None:
+                self._backend = await connect()
+        return self._backend
 
     def on_mount(self) -> None:
+        # Paint the first screen IMMEDIATELY — do NOT block first paint on the backend.
+        # Spawning/discovering lis-backend can take a second or two; loading config behind
+        # it would leave the terminal blank until then. Register a theme synchronously
+        # (no backend needed), push the dashboard, then finish startup in a worker.
         try:
             self.register_theme(MLX_THEME)
-            saved = self.config.settings.theme
-            self.theme = saved if saved in self.available_themes else "mlx-dark"
+            self.theme = "mlx-dark"
         except Exception:
             pass  # fall back to a built-in theme rather than crashing
 
         from .screens.dashboard import DashboardScreen
 
         self.push_screen(DashboardScreen())
+        self.run_worker(self._startup(), exclusive=False)
+
+    async def _startup(self) -> None:
+        """Connect to the backend, load config, then apply the saved theme and (if no model
+        server is installed) surface the setup screen. Runs as a worker so first paint isn't
+        blocked on the backend coming up."""
+        await self.refresh_config()  # load profiles + settings from the backend
+        try:
+            saved = self.config.settings.theme
+            if saved in self.available_themes:
+                self.theme = saved
+        except Exception:
+            pass
 
         from .bootstrap import mlx_server_available
 
@@ -250,16 +279,23 @@ class MlxLauncherApp(App):
 
             self.push_screen(SetupScreen())
 
-    # --- config ----------------------------------------------------------
+    # --- config (cached from the backend) --------------------------------
+
+    async def refresh_config(self) -> None:
+        """Reload the cached server profiles + settings from the backend over the wire."""
+        client = await self.backend()
+        try:
+            servers = [ServerConfig.model_validate(s) for s in await client.list_servers()]
+            settings = AppSettings.model_validate(await client.get_settings())
+            self.config = ConfigFile(servers=servers, settings=settings)
+        except Exception:  # noqa: BLE001 — keep the last good cache rather than crash the UI
+            pass
 
     def notify(self, message: str, **kwargs) -> None:
         # toast text is arbitrary (names, paths, errors) and may contain markup
         # chars like `[w=600&h=400]`; never parse it as markup (it would crash).
         kwargs.setdefault("markup", False)
         super().notify(message, **kwargs)
-
-    def save_config(self) -> None:
-        store.save(self.config)
 
     # --- clipboard -------------------------------------------------------
 
@@ -286,23 +322,6 @@ class MlxLauncherApp(App):
         self.copy_to_clipboard(text)
         return True
 
-    # --- server manager registry ----------------------------------------
-
-    def create_manager(self, cfg: ServerConfig) -> ServerManager:
-        manager = ServerManager(
-            cfg, mlx_override=self.config.settings.mlx_server_path or None
-        )
-        self._managers[cfg.id] = manager
-        return manager
-
-    def get_manager(self, cfg_id: str) -> Optional[ServerManager]:
-        return self._managers.get(cfg_id)
-
-    def running_managers(self) -> list[ServerManager]:
-        """Every server manager with a live process. Only one server can bind a
-        given host:port, so callers use this to free a port before launching."""
-        return [m for m in self._managers.values() if m.is_running]
-
     def on_unmount(self) -> None:
         # Stop any voice playback/recording so its worker thread returns — otherwise asyncio's
         # shutdown_default_executor() blocks joining it and the process appears to hang on quit.
@@ -311,19 +330,8 @@ class MlxLauncherApp(App):
             sd.stop()
         except Exception:  # noqa: BLE001 — sounddevice not installed / no active stream
             pass
-        # Don't orphan model-server subprocesses on quit: SIGTERM them all, give them a
-        # moment to exit, then SIGKILL any survivor. A server still loading weights can be
-        # slow to honor SIGTERM and would otherwise outlive us holding memory and the port
-        # (children run in their own session, so they aren't killed along with us).
-        running = [m for m in self._managers.values() if m.is_running]
-        for manager in running:
-            manager.terminate()
-        deadline = time.monotonic() + 2.0
-        while running and time.monotonic() < deadline:
-            time.sleep(0.05)
-            running = [m for m in running if m.is_alive()]
-        for manager in running:
-            manager.kill_now()
+        # Model-server subprocesses are owned by the backend now; it stops them on its own
+        # shutdown (core.service lifespan), so the TUI doesn't manage their lifecycle here.
 
 
 def run() -> None:

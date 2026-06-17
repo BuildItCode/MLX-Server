@@ -117,7 +117,7 @@ class SetupScreen(Screen):
         field.focus()
 
     @on(Input.Submitted, "#locate_path")
-    def _locate_submit(self, event: Input.Submitted) -> None:
+    async def _locate_submit(self, event: Input.Submitted) -> None:
         path = os.path.expanduser(event.value.strip())
         if not path:
             return
@@ -125,7 +125,11 @@ class SetupScreen(Screen):
             self.notify("Not a file: " + path, severity="error")
             return
         self.app.config.settings.mlx_server_path = path
-        self.app.save_config()
+        try:
+            client = await self.app.backend()
+            await client.patch_settings({"mlx_server_path": path})
+        except Exception:  # noqa: BLE001
+            pass
         self.notify(f"Using {path}")
         self.query_one("#locate_path", Input).add_class("hidden")
         self._refresh_status()

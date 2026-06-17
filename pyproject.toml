@@ -21,6 +21,10 @@ dependencies = [
     "ddgs>=9.0",
     "pypdf>=4.0",
     "huggingface_hub>=0.34,<2",
+    # Local backend service (HTTP + SSE). Pure-Python, async — the backend the frontends drive.
+    "starlette>=0.37",
+    "sse-starlette>=2.0",
+    "uvicorn>=0.29",
 ]
 
 [project.optional-dependencies]
@@ -44,6 +48,7 @@ voice = [
 [project.scripts]
 lis-start = "mlx_launcher.app:run"
 mlx-acp-agent = "mlx_launcher.acp.entry:main"
+lis-backend = "mlx_launcher.core.server_main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mlx_launcher"]

@@ -19,7 +19,21 @@ pick_python() {
   return 1
 }
 
-if [ ! -d "$VENV" ]; then
+# Recreate the venv if missing, broken, or MOVED. If the base Python was upgraded/removed,
+# .venv/bin/python won't run; and venvs aren't relocatable — if .venv was created elsewhere and
+# renamed/copied here, its activate + console-script shebangs point at the old path (so python /
+# lis-start vanish). activate always names its own dir, so if it no longer mentions THIS .venv, it moved.
+recreate=""
+if [ ! -x "$VENV/bin/python" ] || ! "$VENV/bin/python" -c '' >/dev/null 2>&1; then
+  recreate="its Python won't run"
+elif [ -f "$VENV/bin/activate" ] && ! grep -qF "$VENV" "$VENV/bin/activate"; then
+  recreate="it was created in a different folder and moved here"
+fi
+if [ -n "$recreate" ] || [ ! -d "$VENV" ]; then
+  if [ -d "$VENV" ]; then
+    echo "Recreating .venv ($recreate) ..."
+    rm -rf "$VENV"
+  fi
   PYTHON="$(pick_python || true)"
   if [ -z "${PYTHON:-}" ]; then
     echo "No suitable Python found (need 3.10-3.14). Try: sudo apt install python3.12 python3.12-venv" >&2
@@ -29,19 +43,23 @@ if [ ! -d "$VENV" ]; then
   "$PYTHON" -m venv "$VENV"
 fi
 
+# Use the venv's interpreter/scripts by explicit path — don't trust a bare `python`/`lis-start`.
+VPY="$VENV/bin/python"
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"
 
 reinstall=0
 if [ "${1:-}" = "--reinstall" ]; then reinstall=1; shift; fi
 
-if [ "$reinstall" -eq 1 ] || ! command -v lis-start >/dev/null 2>&1; then
+# Gate on the venv's own lis-backend (the newer entry point); check the file, not PATH, so a global
+# lis-backend can't mask a venv that still needs the new deps (starlette/uvicorn/…).
+if [ "$reinstall" -eq 1 ] || [ ! -x "$VENV/bin/lis-backend" ]; then
   echo "Installing dependencies (this runs only when needed) ..."
-  python -m pip install --quiet --upgrade pip
-  python -m pip install --quiet -e "$HERE"
+  "$VPY" -m pip install --quiet --upgrade pip
+  "$VPY" -m pip install --quiet -e "$HERE"
 fi
 
 command -v llama-server >/dev/null 2>&1 \
   || echo "NOTE: llama-server not found — run ./install-linux.sh or install llama.cpp first."
 
-exec lis-start "$@"
+exec "$VENV/bin/lis-start" "$@"

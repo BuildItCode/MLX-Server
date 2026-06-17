@@ -8,8 +8,7 @@ from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Label, ListItem, ListView
 
-from ..config import store
-from ..config.models import ServerConfig
+from ..models import ServerConfig
 from ..widgets.banner import Banner
 from ..widgets.safe_content import title_sub
 
@@ -45,9 +44,14 @@ class DashboardScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.refresh_list()
+        self.refresh_list()  # paint immediately with whatever's cached
+        self.run_worker(self._load())  # then fill in from the backend (it may still be coming up)
 
     def on_screen_resume(self) -> None:
+        self.run_worker(self._load())
+
+    async def _load(self) -> None:
+        await self.app.refresh_config()
         self.refresh_list()
 
     def refresh_list(self) -> None:
@@ -89,8 +93,12 @@ class DashboardScreen(Screen):
         if s is None:
             self.notify("Select a server first", severity="warning")
             return
-        store.delete_server(self.app.config, s.id)
-        self.app.save_config()
+        self.run_worker(self._delete(s), exclusive=False)
+
+    async def _delete(self, s: ServerConfig) -> None:
+        client = await self.app.backend()
+        await client.delete_server(s.id)
+        await self.app.refresh_config()
         self.refresh_list()
         self.notify(f"Deleted {s.name}")
 

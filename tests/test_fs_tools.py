@@ -1,7 +1,22 @@
 import asyncio
 import os
 
+import pytest
+
 from mlx_launcher.chat import fs_tools
+
+
+def test_resolve_browser_target_confines_and_checks_existence(tmp_path):
+    # open_in_browser is now a backend tool that asks the frontend to open a URL; the
+    # security-critical confinement (no escaping the working dir, must exist) lives here.
+    (tmp_path / "page.html").write_text("<h1>hi</h1>", encoding="utf-8")
+    root = str(tmp_path)
+    assert fs_tools.resolve_browser_target(root, "page.html").startswith("file://")
+    assert fs_tools.resolve_browser_target(root, "https://example.com") == "https://example.com"
+    with pytest.raises(ValueError):
+        fs_tools.resolve_browser_target(root, "../secret.txt")  # escapes the root
+    with pytest.raises(ValueError):
+        fs_tools.resolve_browser_target(root, "missing.html")  # doesn't exist
 
 
 def test_specs_cover_all_tool_names():

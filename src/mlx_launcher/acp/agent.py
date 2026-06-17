@@ -1,13 +1,15 @@
-"""An ACP (Agent Client Protocol) agent that bridges an editor (e.g. Xcode 27)
-to a running mlx_lm.server.
+"""An ACP (Agent Client Protocol) agent that bridges an editor (e.g. Xcode 27) to a local model.
 
-Two modes, chosen per prompt:
-  * chat    — stream assistant text (used when the client exposes no fs/terminal
-              tools, or tools are disabled).
-  * agentic — an OpenAI tool-calling loop where the model can read_file /
-              write_file / run_command, executed via the ACP client's filesystem
-              and terminal methods (with a permission prompt before writes), and
-              surfaced as ACP tool_call / tool_call_update notifications."""
+The agent loop itself is the shared :class:`mlx_launcher.core.agent.AgentRunner` — the ACP agent is
+now a thin translator: it owns the ACP protocol (sessions, streaming session updates, permission
+prompts) and supplies the runner with (a) a tool executor that **delegates filesystem + terminal
+work to the editor** via the ACP client (so edits flow through Xcode's buffers/terminals, the
+faithful ACP model) and (b) a permission policy backed by ``request_permission``. This removes the
+duplicated tool loop that used to live here and gives ACP the runner's format-recovery + truncation
+handling for free.
+
+Two shapes, chosen per prompt: with no editor fs/terminal access (or ``--no-tools``) the runner
+streams a plain chat answer; otherwise it runs the tool loop over the editor-delegated tools."""
 
 from __future__ import annotations
 
@@ -18,7 +20,6 @@ import uuid
 from typing import Any, Optional
 
 import acp
-import httpx
 from acp import (
     start_tool_call,
     text_block,
@@ -36,11 +37,13 @@ from acp.schema import (
 )
 
 from .. import __version__
-from .bridge import MlxBridge
+from ..core import events as ev
+from ..core.agent import AgentRunner, RunPolicy, ToolOutcome, ToolSet
+from ..engine.openai import OpenAIEngine
 
 log = logging.getLogger("mlx-acp-agent")
 
-# OpenAI finish_reason -> ACP StopReason
+# OpenAI finish_reason / TurnFinished.reason -> ACP StopReason
 _FINISH_MAP = {
     "stop": "end_turn",
     "length": "max_tokens",
@@ -48,14 +51,11 @@ _FINISH_MAP = {
     "content_filter": "refusal",
     "tool_calls": "end_turn",
 }
+_TOOL_KIND = {"read_file": "read", "write_file": "edit", "run_command": "execute"}
 
 _MAX_TOOL_ITERS = 12
 _TOOL_OUTPUT_LIMIT = 4000
 _TERMINAL_TIMEOUT = 120.0  # cap a single run_command so a hung process can't block the turn
-
-
-class _Cancelled(Exception):
-    """Raised internally when a session is cancelled during a blocking model call."""
 
 
 def _truncate(text: str, limit: int = _TOOL_OUTPUT_LIMIT) -> str:
@@ -85,23 +85,31 @@ def _blocks_to_text(blocks: list) -> str:
     return "\n".join(parts)
 
 
+def _fn(name: str, description: str, properties: dict, required: list[str]) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {"type": "object", "properties": properties, "required": required},
+        },
+    }
+
+
 class MlxAcpAgent:
-    """Implements the subset of the ACP Agent protocol we support."""
+    """Implements the subset of the ACP Agent protocol we support, driving core.AgentRunner."""
 
     def __init__(self, base_url: str, model: str, api_key: str = "not-needed", use_tools: bool = True) -> None:
         self.base_url = base_url
         self.model = model
         self.use_tools = use_tools
-        # match the chat UI's budget so reasoning models aren't cut off at the
-        # server's 512-token default (see chat/client.py:DEFAULT_MAX_TOKENS)
-        self.bridge = MlxBridge(base_url, model, api_key, max_tokens=16384)
+        # match the chat UI's budget so reasoning models aren't cut off at the server's 512 default
+        self.engine = OpenAIEngine(base_url, model, api_key, max_tokens=16384)
         self._client: Optional[acp.Client] = None
         self._sessions: dict[str, list[dict]] = {}
         self._cancelled: set[str] = set()
-        # One lock per session so two overlapping prompts can't interleave appends into
-        # the same history list (which would produce malformed assistant/tool sequences).
+        # One lock per session so two overlapping prompts can't interleave appends into one history.
         self._locks: dict[str, asyncio.Lock] = {}
-        # client capabilities (learned at initialize)
         self._fs_read = False
         self._fs_write = False
         self._terminal = False
@@ -124,7 +132,6 @@ class MlxAcpAgent:
         self._terminal = bool(getattr(client_capabilities, "terminal", False)) if client_capabilities else False
         log.info("client caps: fs_read=%s fs_write=%s terminal=%s", self._fs_read, self._fs_write, self._terminal)
         return acp.InitializeResponse(
-            # negotiate down: never claim a newer protocol than the client asked for
             protocol_version=min(protocol_version, acp.PROTOCOL_VERSION),
             agent_capabilities=AgentCapabilities(
                 load_session=False,
@@ -148,100 +155,65 @@ class MlxAcpAgent:
     async def prompt(self, prompt: list, session_id: str, message_id: Optional[str] = None, **kwargs: Any) -> acp.PromptResponse:
         if session_id not in self._sessions:
             raise acp.RequestError.invalid_params({"session_id": session_id, "reason": "unknown session"})
-        # Serialize prompts per session: a second prompt for the same session waits for the
-        # first to finish rather than interleaving into its shared history.
-        lock = self._locks.get(session_id)
-        if lock is None:
-            lock = self._locks[session_id] = asyncio.Lock()
+        lock = self._locks.setdefault(session_id, asyncio.Lock())
         async with lock:
-            if self.use_tools and (self._fs_read or self._fs_write or self._terminal):
-                return await self._agentic_prompt(prompt, session_id)
-            return await self._chat_prompt(prompt, session_id)
+            return await self._run(prompt, session_id)
 
-    # --- chat mode (streaming) ------------------------------------------
+    # --- the run (translate AgentRunner events ⇄ ACP) --------------------
 
-    async def _chat_prompt(self, prompt: list, session_id: str) -> acp.PromptResponse:
+    async def _run(self, prompt: list, session_id: str) -> acp.PromptResponse:
         history = self._sessions.setdefault(session_id, [])
         history.append({"role": "user", "content": _blocks_to_text(prompt)})
         self._cancelled.discard(session_id)
 
-        assistant: list[str] = []
+        tools = self._build_toolset(session_id) if self.use_tools else ToolSet()
+        runner = AgentRunner(
+            self.engine,
+            tools=tools,
+            policy=RunPolicy(max_iters=_MAX_TOOL_ITERS, native_tools=True),
+            permission=self._permission_policy(session_id),
+            cancel=lambda: session_id in self._cancelled,
+        )
+
+        streamed = False
         finish = "stop"
         try:
-            async for kind, text in self.bridge.stream_chat(history, cancel=lambda: session_id in self._cancelled):
-                if kind == "content":
-                    assistant.append(text)
-                    await self._emit(session_id, update_agent_message_text(text))
-                elif kind == "reason":
-                    await self._emit(session_id, update_agent_thought_text(text))
-                elif kind == "finish":
-                    finish = text
-        except (httpx.HTTPError, OSError) as exc:
-            await self._emit(session_id, update_agent_message_text(self._unreachable_msg(exc)))
-            self._finalize(history, assistant)
+            async for event in runner.run(history):
+                if isinstance(event, ev.ContentDelta):
+                    streamed = True
+                    await self._emit(session_id, update_agent_message_text(event.text))
+                elif isinstance(event, ev.ReasonDelta):
+                    await self._emit(session_id, update_agent_thought_text(event.text))
+                elif isinstance(event, ev.ToolStarted):
+                    kind = _TOOL_KIND.get(event.name, "other")
+                    await self._emit(session_id, start_tool_call(event.tool_id, event.phrase,
+                                                                  kind=kind, status="in_progress"))
+                elif isinstance(event, ev.ToolFinished):
+                    status = "completed" if event.status == "ok" else "failed"
+                    await self._emit(session_id, update_tool_call(
+                        event.tool_id, status=status,
+                        content=[tool_content(text_block(_truncate(event.preview or event.result)))]))
+                elif isinstance(event, ev.TurnFinished):
+                    finish = event.reason
+                    if event.text and not streamed:  # tool loop doesn't stream — emit the answer now
+                        await self._emit(session_id, update_agent_message_text(event.text))
+                elif isinstance(event, ev.TurnFailed):
+                    await self._emit(session_id, update_agent_message_text(self._unreachable_msg(event.error)))
+                    history.extend(runner.turns)
+                    return acp.PromptResponse(stop_reason="end_turn")
+        except (OSError,) as exc:  # transport-level failure outside the runner's own handling
+            await self._emit(session_id, update_agent_message_text(self._unreachable_msg(str(exc))))
             return acp.PromptResponse(stop_reason="end_turn")
 
-        self._finalize(history, assistant)
+        history.extend(runner.turns)  # keep the exchange (assistant + tool turns) for the next prompt
         if session_id in self._cancelled:
             self._cancelled.discard(session_id)
             return acp.PromptResponse(stop_reason="cancelled")
         return acp.PromptResponse(stop_reason=_FINISH_MAP.get(finish, "end_turn"))
 
-    # --- agentic mode (tool calling) ------------------------------------
+    # --- editor-delegated tools -----------------------------------------
 
-    async def _agentic_prompt(self, prompt: list, session_id: str) -> acp.PromptResponse:
-        history = self._sessions.setdefault(session_id, [])
-        history.append({"role": "user", "content": _blocks_to_text(prompt)})
-        self._cancelled.discard(session_id)
-        tools = self._tool_specs()
-
-        for _ in range(_MAX_TOOL_ITERS):
-            if session_id in self._cancelled:
-                self._cancelled.discard(session_id)
-                return acp.PromptResponse(stop_reason="cancelled")
-            try:
-                data = await self._chat_cancellable(history, tools, session_id)
-            except _Cancelled:
-                self._cancelled.discard(session_id)
-                return acp.PromptResponse(stop_reason="cancelled")
-            except (httpx.HTTPError, OSError) as exc:
-                await self._emit(session_id, update_agent_message_text(self._unreachable_msg(exc)))
-                return acp.PromptResponse(stop_reason="end_turn")
-
-            choice = (data.get("choices") or [{}])[0]
-            msg = choice.get("message") or {}
-            content = msg.get("content") or ""
-            tool_calls = msg.get("tool_calls") or []
-
-            if tool_calls:
-                history.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
-            else:
-                history.append({"role": "assistant", "content": content})
-            if content:
-                await self._emit(session_id, update_agent_message_text(content))
-
-            if not tool_calls:
-                return acp.PromptResponse(stop_reason=_FINISH_MAP.get(choice.get("finish_reason", "stop"), "end_turn"))
-
-            for call in tool_calls:
-                result = await self._run_tool(session_id, call)
-                history.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": result})
-
-        return acp.PromptResponse(stop_reason="max_turn_requests")
-
-    async def _chat_cancellable(self, history: list[dict], tools: list[dict], session_id: str) -> dict:
-        """One non-streaming completion that aborts promptly on cancel — the request can
-        otherwise block for up to bridge.read_timeout (600s) with Stop having no effect."""
-        task = asyncio.ensure_future(self.bridge.chat(history, tools=tools or None))
-        while True:
-            done, _pending = await asyncio.wait({task}, timeout=0.2)
-            if done:
-                return task.result()
-            if session_id in self._cancelled:
-                task.cancel()
-                raise _Cancelled()
-
-    def _tool_specs(self) -> list[dict]:
+    def _build_toolset(self, session_id: str) -> ToolSet:
         specs: list[dict] = []
         if self._fs_read:
             specs.append(_fn("read_file", "Read a UTF-8 text file from the user's workspace.",
@@ -252,56 +224,37 @@ class MlxAcpAgent:
         if self._terminal:
             specs.append(_fn("run_command", "Run a shell command in the workspace and return its output.",
                              {"command": {"type": "string"}, "cwd": {"type": "string"}}, ["command"]))
-        return specs
 
-    async def _run_tool(self, session_id: str, call: dict) -> str:
-        fn = call.get("function") or {}
-        name = fn.get("name") or ""
-        try:
-            args = json.loads(fn.get("arguments") or "{}")
-        except json.JSONDecodeError:
-            args = {}
-        tool_id = call.get("id") or name or "tool"
-        kind = {"read_file": "read", "write_file": "edit", "run_command": "execute"}.get(name, "other")
-        title = {
-            "read_file": f"Read {args.get('path', '')}",
-            "write_file": f"Edit {args.get('path', '')}",
-            "run_command": f"Run: {args.get('command', '')}",
-        }.get(name, name)
-        await self._emit(session_id, start_tool_call(tool_id, title, kind=kind, status="in_progress"))
-        try:
-            if name == "read_file" and self._fs_read:
-                resp = await self._client.read_text_file(path=args["path"], session_id=session_id)
-                await self._done_tool(session_id, tool_id, _truncate(resp.content))
-                return resp.content
-            if name == "write_file" and self._fs_write:
-                if not await self._request_write_permission(session_id, tool_id, args.get("path", "")):
-                    await self._fail_tool(session_id, tool_id, "permission denied")
-                    return "The user denied permission to write this file."
-                await self._client.write_text_file(content=args.get("content", ""), path=args["path"], session_id=session_id)
-                await self._done_tool(session_id, tool_id, f"wrote {args['path']}")
-                return f"Wrote {args['path']}."
-            if name == "run_command" and self._terminal:
-                out = await self._run_terminal(session_id, args.get("command", ""), args.get("cwd"))
-                await self._done_tool(session_id, tool_id, _truncate(out))
-                return out
-            await self._fail_tool(session_id, tool_id, "tool unavailable")
-            return f"Tool '{name}' is not available."
-        except KeyError as exc:
-            await self._fail_tool(session_id, tool_id, f"missing argument {exc}")
-            return f"Tool '{name}' missing argument {exc}."
-        except Exception as exc:  # noqa: BLE001
-            await self._fail_tool(session_id, tool_id, str(exc))
-            return f"Tool '{name}' failed: {exc}"
+        async def execute(name: str, args: dict) -> ToolOutcome:
+            try:
+                if name == "read_file" and self._fs_read:
+                    resp = await self._client.read_text_file(path=args["path"], session_id=session_id)
+                    return ToolOutcome(resp.content)
+                if name == "write_file" and self._fs_write:
+                    await self._client.write_text_file(content=args.get("content", ""),
+                                                       path=args["path"], session_id=session_id)
+                    return ToolOutcome(f"Wrote {args['path']}.")
+                if name == "run_command" and self._terminal:
+                    return ToolOutcome(await self._run_terminal(session_id, args.get("command", ""), args.get("cwd")))
+                return ToolOutcome(f"Tool '{name}' is not available.", ok=False)
+            except KeyError as exc:
+                return ToolOutcome(f"Tool '{name}' missing argument {exc}.", ok=False)
 
-    async def _request_write_permission(self, session_id: str, tool_id: str, path: str) -> bool:
+        return ToolSet(specs=specs, execute=execute, mutating=frozenset({"write_file"}))
+
+    def _permission_policy(self, session_id: str):
+        async def permission(name: str, args: dict) -> str:
+            return "once" if await self._request_write_permission(session_id, args.get("path", "")) else "deny"
+        return permission
+
+    async def _request_write_permission(self, session_id: str, path: str) -> bool:
         if self._client is None:
             return True
         options = [
             PermissionOption(kind="allow_once", name="Allow", option_id="allow"),
             PermissionOption(kind="reject_once", name="Reject", option_id="reject"),
         ]
-        tool_call = ToolCallUpdate(tool_call_id=tool_id, title=f"Write {path}", kind="edit", status="pending")
+        tool_call = ToolCallUpdate(tool_call_id=uuid.uuid4().hex, title=f"Write {path}", kind="edit", status="pending")
         try:
             resp = await self._client.request_permission(options=options, session_id=session_id, tool_call=tool_call)
         except Exception:  # noqa: BLE001 — client may not support permissions; proceed
@@ -334,29 +287,5 @@ class MlxAcpAgent:
         if self._client is not None:
             await self._client.session_update(session_id=session_id, update=update)
 
-    async def _done_tool(self, session_id: str, tool_id: str, text: str) -> None:
-        await self._emit(session_id, update_tool_call(tool_id, status="completed", content=[tool_content(text_block(text))]))
-
-    async def _fail_tool(self, session_id: str, tool_id: str, text: str) -> None:
-        await self._emit(session_id, update_tool_call(tool_id, status="failed", content=[tool_content(text_block(text))]))
-
-    def _unreachable_msg(self, exc: Exception) -> str:
-        if isinstance(exc, httpx.HTTPStatusError):
-            return f"\n\n⚠️ MLX server returned {exc.response.status_code} at {self.base_url}."
-        return f"\n\n⚠️ Could not reach the MLX server at {self.base_url}.\n{exc}"
-
-    @staticmethod
-    def _finalize(history: list[dict], assistant: list[str]) -> None:
-        if assistant:
-            history.append({"role": "assistant", "content": "".join(assistant)})
-
-
-def _fn(name: str, description: str, properties: dict, required: list[str]) -> dict:
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": {"type": "object", "properties": properties, "required": required},
-        },
-    }
+    def _unreachable_msg(self, error: str) -> str:
+        return f"\n\n⚠️ Could not reach the MLX server at {self.base_url}.\n{error}"

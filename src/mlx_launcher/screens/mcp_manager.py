@@ -10,8 +10,7 @@ from textual.content import Content
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Label, ListItem, ListView, Select
 
-from ..chat import store
-from ..chat.models import McpServer
+from ..models import McpServer
 
 
 class McpItem(ListItem):
@@ -32,7 +31,7 @@ class McpManagerScreen(Screen):
 
     def __init__(self) -> None:
         super().__init__()
-        self.data = store.load()
+        self._servers: list[McpServer] = []  # cache fetched from the backend
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -61,60 +60,53 @@ class McpManagerScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
+        self.run_worker(self._reload())
+
+    async def _reload(self) -> None:
+        client = await self.app.backend()
+        self._servers = [McpServer.model_validate(s) for s in await client.list_resource("mcp-servers")]
         self._refresh()
 
     def _refresh(self) -> None:
         lv = self.query_one("#mcp-list", ListView)
         lv.clear()
-        if not self.data.mcp_servers:
+        if not self._servers:
             lv.append(ListItem(Label("[dim]No MCP servers yet — add one below[/]")))
             return
-        for s in self.data.mcp_servers:
+        for s in self._servers:
             lv.append(McpItem(s))
 
     def _by_id(self, sid):
-        return next((s for s in self.data.mcp_servers if s.id == sid), None)
-
-    def _persist(self, mutate) -> None:
-        """Re-read the store, apply `mutate`, then save. chats.json is one document shared
-        with chats/projects/subagents, so we never write back a stale snapshot that would
-        clobber edits made elsewhere (e.g. a chat message saved by a background worker)."""
-        fresh = store.load()
-        mutate(fresh)
-        store.save(fresh)
-        self.data = fresh
+        return next((s for s in self._servers if s.id == sid), None)
 
     @on(ListView.Selected, "#mcp-list")
-    def _toggle_selected(self, event: ListView.Selected) -> None:
-        self._toggle(getattr(event.item, "server_id", None))
+    async def _toggle_selected(self, event: ListView.Selected) -> None:
+        await self._toggle(getattr(event.item, "server_id", None))
 
-    def action_toggle(self) -> None:
+    async def action_toggle(self) -> None:
         item = self.query_one("#mcp-list", ListView).highlighted_child
-        self._toggle(getattr(item, "server_id", None))
+        await self._toggle(getattr(item, "server_id", None))
 
-    def _toggle(self, sid) -> None:
+    async def _toggle(self, sid) -> None:
         s = self._by_id(sid)
         if not s:
             return
-        new_enabled = not s.enabled
+        s.enabled = not s.enabled
+        client = await self.app.backend()
+        await client.upsert_resource("mcp-servers", s.model_dump())
+        await self._reload()
 
-        def mut(d):
-            t = next((x for x in d.mcp_servers if x.id == sid), None)
-            if t is not None:
-                t.enabled = new_enabled
-        self._persist(mut)
-        self._refresh()
-
-    def action_delete(self) -> None:
+    async def action_delete(self) -> None:
         item = self.query_one("#mcp-list", ListView).highlighted_child
         sid = getattr(item, "server_id", None)
         if sid:
-            self._persist(lambda d: store.delete_mcp(d, sid))
-            self._refresh()
+            client = await self.app.backend()
+            await client.delete_resource("mcp-servers", sid)
+            await self._reload()
             self.notify("Server removed")
 
     @on(Button.Pressed, "#m-add")
-    def _add(self) -> None:
+    async def _add(self) -> None:
         name = self.query_one("#m-name", Input).value.strip()
         transport = self.query_one("#m-transport", Select).value
         if not name:
@@ -134,10 +126,11 @@ class McpManagerScreen(Screen):
         if transport == "sse" and not srv.url:
             self.notify("URL is required for sse", severity="error")
             return
-        self._persist(lambda d: store.upsert_mcp(d, srv))
+        client = await self.app.backend()
+        await client.upsert_resource("mcp-servers", srv.model_dump())
         for fid in ("m-name", "m-command", "m-args", "m-env", "m-url"):
             self.query_one(f"#{fid}", Input).value = ""
-        self._refresh()
+        await self._reload()
         self.notify(f"Added MCP server “{name}”")
 
     @on(Button.Pressed, "#m-back")

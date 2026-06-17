@@ -42,7 +42,7 @@ if [ "$installed" -eq 0 ]; then
   [ -d "$VENV" ] || "$PYBIN" -m venv "$VENV"
   "$VENV/bin/python" -m pip install --quiet --upgrade pip
   "$VENV/bin/python" -m pip install --quiet -e "$HERE"
-  for cmd in lis-start mlx-acp-agent; do
+  for cmd in lis-start lis-backend mlx-acp-agent; do
     ln -sf "$VENV/bin/$cmd" "$BIN/$cmd"; echo "  linked $BIN/$cmd"
   done
 fi

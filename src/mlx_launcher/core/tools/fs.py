@@ -1,0 +1,241 @@
+"""Filesystem tools for the chat's agentic loop, confined to a project's
+**working directory**. Every path is resolved inside that root; attempts to
+escape it (via ``..`` or absolute paths) are rejected. This is what lets a
+project be used as a coding workspace — the model can list/read/create/edit/
+delete files and run commands, all within the chosen folder.
+
+`run_command` runs a real shell in the working directory (with a timeout); it is
+only ever offered when the user has explicitly set a working directory."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import shutil
+from pathlib import Path
+
+from ..._util import kill_process_group, process_group_kwargs
+
+MAX_READ_BYTES = 64_000
+MAX_OUTPUT = 8_000
+COMMAND_TIMEOUT = 120.0
+
+FS_TOOL_NAMES = {
+    "list_directory",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "delete_path",
+    "run_command",
+    "open_in_browser",
+}
+
+# Tools that change the user's files/system or act outward — gated behind a permission prompt.
+# Read-only tools (list_directory, read_file) run without asking.
+MUTATING_TOOLS = {"write_file", "edit_file", "delete_path", "run_command", "open_in_browser"}
+
+SYSTEM_NOTE = (
+    "You have file tools scoped to this project's working directory:\n  {root}\n"
+    "Use list_directory, read_file, write_file, edit_file, delete_path, and run_command "
+    "to work in it. All paths are RELATIVE to the working directory.\n"
+    "ACT on the request by CALLING these tools — when asked to create, build, fix, or change "
+    "something, actually do it with write_file / edit_file / run_command. Do NOT just describe "
+    "the steps, print the code for the user to copy, or ask whether you should proceed: make the "
+    "change. Keep going across as many tool calls as it takes, and only stop to ask a question if "
+    "you are genuinely blocked.\n"
+    "When you build something viewable in a browser (an HTML page, a local web app), call "
+    "open_in_browser with its path so the user can see it.\n"
+    "Inspect files before editing, make focused changes, and when the task is complete give a "
+    "brief summary of what you changed."
+)
+
+
+def system_note(root: str) -> str:
+    """The filesystem system prompt for `root`. The AGENTS.md guidance is gated on
+    whether the file actually exists, so the model never hunts for a missing one —
+    when there's none, it's told to answer directly."""
+    note = SYSTEM_NOTE.format(root=root)
+    if os.path.isfile(os.path.join(os.path.expanduser(root), "AGENTS.md")):
+        note += ("\nThis project HAS an AGENTS.md — read it FIRST (read_file AGENTS.md) and follow its "
+                 "conventions before doing anything else.")
+    else:
+        note += ("\nThere is no AGENTS.md here — do NOT look for one or try to read it; just respond "
+                 "to the request directly.")
+    return note
+
+
+def fs_specs() -> list[dict]:
+    """OpenAI function-tool specs for the filesystem tools."""
+
+    def spec(name: str, desc: str, props: dict, required: list[str]) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": desc,
+                "parameters": {"type": "object", "properties": props, "required": required},
+            },
+        }
+
+    return [
+        spec("list_directory", "List files and folders. 'path' is relative to the working directory ('.' = root).",
+             {"path": {"type": "string", "description": "relative directory path; default '.'"}}, []),
+        spec("read_file", "Read a UTF-8 text file and return its contents.",
+             {"path": {"type": "string", "description": "relative file path"}}, ["path"]),
+        spec("write_file", "Create or overwrite a text file. Parent folders are created as needed.",
+             {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
+        spec("edit_file", "Replace the first exact occurrence of old_text with new_text in a file.",
+             {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}},
+             ["path", "old_text", "new_text"]),
+        spec("delete_path", "Delete a file, or a directory and its contents, inside the working directory.",
+             {"path": {"type": "string"}}, ["path"]),
+        spec("run_command", "Run a shell command in the working directory; returns its combined stdout/stderr.",
+             {"command": {"type": "string"}}, ["command"]),
+        spec("open_in_browser",
+             "Open a file you created (e.g. an HTML page) or an http(s) URL in the user's web browser "
+             "so they can see it. Use this after building something viewable.",
+             {"path": {"type": "string",
+                       "description": "a file path relative to the working directory, or an http(s):// URL"}},
+             ["path"]),
+    ]
+
+
+# --- path confinement ----------------------------------------------------
+
+def _root(root: str) -> Path:
+    return Path(os.path.expanduser(root)).resolve()
+
+
+def _resolve(root: str, rel: str) -> Path:
+    """Resolve `rel` under the working root, rejecting anything that escapes it."""
+    base = _root(root)
+    target = (base / (rel or ".")).resolve()
+    if target != base and base not in target.parents:
+        raise ValueError(f"path escapes the working directory: {rel!r}")
+    return target
+
+
+def resolve_browser_target(root: str, target: str) -> str:
+    """A URL the chat may hand to the OS browser: an ``http(s)://`` URL as-is, or a file inside
+    the working directory resolved to a ``file://`` URL. Raises ValueError if it escapes the root
+    or doesn't exist — so the model can't point the browser at arbitrary local files."""
+    t = (target or "").strip()
+    if not t:
+        raise ValueError("nothing to open")
+    if t.startswith(("http://", "https://")):
+        return t
+    p = _resolve(root, t)  # confined to the working directory (raises on escape)
+    if not p.exists():
+        raise ValueError(f"not found: {target}")
+    return p.as_uri()
+
+
+# --- operations ----------------------------------------------------------
+
+def _list_directory(root: str, rel: str) -> str:
+    p = _resolve(root, rel)
+    if not p.exists():
+        return f"not found: {rel}"
+    if p.is_file():
+        return f"{rel} is a file, not a directory"
+    items = sorted(p.iterdir(), key=lambda c: (c.is_file(), c.name.lower()))
+    lines = [f"{c.name}/" if c.is_dir() else c.name for c in items]
+    return "\n".join(lines) or "(empty directory)"
+
+
+def _read_file(root: str, rel: str) -> str:
+    p = _resolve(root, rel)
+    if not p.is_file():
+        return f"not a file: {rel}"
+    with p.open("rb") as f:  # bounded read: never pull a multi-GB file fully into memory
+        raw = f.read(MAX_READ_BYTES + 1)
+    text = raw[:MAX_READ_BYTES].decode("utf-8", errors="replace")
+    if len(raw) > MAX_READ_BYTES:
+        text += f"\n… (truncated at {MAX_READ_BYTES} bytes)"
+    return text
+
+
+def _write_file(root: str, rel: str, content: str) -> str:
+    p = _resolve(root, rel)
+    if p == _root(root):
+        return "refusing to overwrite the working directory itself"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content, encoding="utf-8")
+    return f"wrote {rel} ({len(content)} chars)"
+
+
+def _edit_file(root: str, rel: str, old: str, new: str) -> str:
+    p = _resolve(root, rel)
+    if not p.is_file():
+        return f"not a file: {rel}"
+    if not old:
+        return "old_text must not be empty"
+    text = p.read_text(encoding="utf-8", errors="replace")
+    count = text.count(old)
+    if count == 0:
+        return f"old_text not found in {rel}"
+    p.write_text(text.replace(old, new, 1), encoding="utf-8")
+    return f"edited {rel}" + ("" if count == 1 else f" (replaced the first of {count} matches)")
+
+
+def _delete_path(root: str, rel: str) -> str:
+    p = _resolve(root, rel)
+    if p == _root(root):
+        return "refusing to delete the working directory itself"
+    if not p.exists():
+        return f"not found: {rel}"
+    if p.is_dir():
+        shutil.rmtree(p)
+    else:
+        p.unlink()
+    return f"deleted {rel}"
+
+
+async def _run_command(root: str, command: str) -> str:
+    if not command.strip():
+        return "empty command"
+    # own process group so a timeout can kill the whole tree (POSIX session / Windows group)
+    spawn = process_group_kwargs()
+    proc = await asyncio.create_subprocess_shell(
+        command,
+        cwd=str(_root(root)),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        env=os.environ.copy(),
+        **spawn,
+    )
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=COMMAND_TIMEOUT)
+    except asyncio.TimeoutError:
+        kill_process_group(proc)
+        try:  # reap so we don't leave a zombie
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            pass
+        return f"command timed out after {int(COMMAND_TIMEOUT)}s"
+    text = out.decode("utf-8", errors="replace")
+    if len(text) > MAX_OUTPUT:
+        text = text[:MAX_OUTPUT] + "\n… (output truncated)"
+    return f"[exit {proc.returncode}]\n{text}".strip()
+
+
+async def run_fs_tool(root: str, name: str, args: dict) -> str:
+    """Dispatch one filesystem tool call, confined to `root`."""
+    try:
+        if name == "list_directory":
+            return await asyncio.to_thread(_list_directory, root, args.get("path", ".") or ".")
+        if name == "read_file":
+            return await asyncio.to_thread(_read_file, root, args["path"])
+        if name == "write_file":
+            return await asyncio.to_thread(_write_file, root, args["path"], args.get("content", ""))
+        if name == "edit_file":
+            return await asyncio.to_thread(_edit_file, root, args["path"], args.get("old_text", ""), args.get("new_text", ""))
+        if name == "delete_path":
+            return await asyncio.to_thread(_delete_path, root, args["path"])
+        if name == "run_command":
+            return await _run_command(root, args.get("command", ""))
+        return f"unknown filesystem tool: {name}"
+    except KeyError as exc:
+        return f"missing required argument: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        return f"error: {exc}"

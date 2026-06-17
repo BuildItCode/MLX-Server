@@ -15,7 +15,7 @@ from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Label, Select, Static, TextArea
 
 from ..chat import skills, store
-from ..chat.models import Subagent
+from ..models import Subagent
 from ..widgets.path_input import DropPathInput
 from ..widgets.safe_content import plain
 from ..widgets.toggle_chip import ToggleChip

@@ -15,8 +15,7 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Label, TextArea
 
-from ..chat import store
-from ..chat.models import ChatStoreFile, Project
+from ..models import ChatStoreFile, Project
 from ..widgets.path_input import DropPathInput, resolve_path
 
 
@@ -28,7 +27,7 @@ class ProjectEditorScreen(Screen):
 
     def __init__(self, data: ChatStoreFile, project: Optional[Project] = None) -> None:
         super().__init__()
-        self.data = data  # shared with the chat screen so edits are picked up
+        self.data = data  # kept for API compat; saves go to the backend (the chat screen reloads on resume)
         self.project = project
 
     def compose(self) -> ComposeResult:
@@ -92,7 +91,7 @@ class ProjectEditorScreen(Screen):
 
     # --- save / cancel ---------------------------------------------------
 
-    def _save(self) -> bool:
+    async def _save(self) -> bool:
         name = self.query_one("#p-name", Input).value.strip()
         if not name:
             self.notify("Name is required", severity="error")
@@ -111,21 +110,21 @@ class ProjectEditorScreen(Screen):
         proj.name = name
         proj.working_dir = cwd
         proj.instructions = instructions
-        store.upsert_project(self.data, proj)
-        store.save(self.data)
+        client = await self.app.backend()
+        await client.upsert_resource("projects", proj.model_dump())
         return True
 
     @on(Button.Pressed, "#p-save")
-    def _save_btn(self) -> None:
-        if self._save():
+    async def _save_btn(self) -> None:
+        if await self._save():
             self.app.pop_screen()
 
     @on(Button.Pressed, "#p-cancel")
     def _cancel_btn(self) -> None:
         self.app.pop_screen()
 
-    def action_save(self) -> None:
-        if self._save():
+    async def action_save(self) -> None:
+        if await self._save():
             self.app.pop_screen()
 
     def action_cancel(self) -> None:

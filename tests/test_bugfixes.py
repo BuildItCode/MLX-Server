@@ -57,17 +57,17 @@ def test_recover_json_tool_calls_is_conservative():
 
 
 def test_tool_call_echo_keeps_native_markup_but_cleans_harmony():
-    from mlx_launcher.screens.chat import ChatScreen
+    from mlx_launcher.core.agent import _tool_call_echo  # moved into the unified loop
 
     calls = [{"name": "read_file", "arguments": {"path": "a.py"}}]
     # MiniMax's native XML is echoed verbatim so the model stays in its dialect (re-rendering it
     # as Hermes is what made it drift)
     xml = ('Let me look.\n<minimax:tool_call>\n<invoke name="read_file">'
            '<parameter name="path">a.py</parameter></invoke>\n</minimax:tool_call>')
-    assert ChatScreen._tool_call_echo(xml, "", calls) == xml
+    assert _tool_call_echo(xml, "", calls) == xml
     # anything else is rebuilt as a clean prose + <tool_call> turn (nudges a drifted model back,
     # and avoids gpt-oss Harmony's empty final channel / nested tokens)
-    echo = ChatScreen._tool_call_echo("", "thinking", calls)
+    echo = _tool_call_echo("", "thinking", calls)
     assert "<tool_call>" in echo and "read_file" in echo
 
 

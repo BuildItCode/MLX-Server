@@ -47,11 +47,15 @@ class ThemeScreen(Screen):
             self.app.theme = name  # live preview
 
     @on(ListView.Selected, "#themes")
-    def _commit(self, event: ListView.Selected) -> None:
+    async def _commit(self, event: ListView.Selected) -> None:
         name = getattr(event.item, "theme_name", None) or self.app.theme
         self.app.theme = name
         self.app.config.settings.theme = name
-        self.app.save_config()
+        try:
+            client = await self.app.backend()
+            await client.patch_settings({"theme": name})
+        except Exception:  # noqa: BLE001
+            pass
         self.app.pop_screen()
         self.notify(f"Theme: {name}")
 
