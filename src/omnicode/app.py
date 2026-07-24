@@ -342,8 +342,23 @@ class OmniCodeApp(App):
             sd.stop()
         except Exception:  # noqa: BLE001 — sounddevice not installed / no active stream
             pass
-        # Model-server subprocesses are owned by the backend now; it stops them on its own
-        # shutdown (core.service lifespan), so the TUI doesn't manage their lifecycle here.
+
+    async def action_quit(self) -> None:
+        """Ctrl+Q: shut down the backend this TUI is connected to, then exit.
+
+        A backend left running outlives code changes — the next TUI silently connects to
+        the OLD process (via backend.json) and every fix made since looks like it "didn't
+        work". Killing it here keeps restarts honest; the next launch spawns a fresh one
+        on demand (client.connect). terminate_backend only signals the process the
+        discovery file still names, so a backend another TUI started since is untouched.
+        """
+        backend = self._backend
+        if backend is not None:
+            try:
+                await backend.terminate_backend()
+            except Exception:  # noqa: BLE001 — quitting must never hang on a stuck backend
+                pass
+        self.exit()
 
 
 def run() -> None:

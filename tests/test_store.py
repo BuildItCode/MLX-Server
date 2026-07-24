@@ -1,10 +1,10 @@
-from mlx_launcher.config import store
-from mlx_launcher.config.models import ConfigFile, ServerConfig
+from omnicode.config import store
+from omnicode.config.models import ConfigFile, ServerConfig
 
 
 def test_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    assert store.config_path() == tmp_path / "mlx-launcher" / "servers.json"
+    assert store.config_path() == tmp_path / "omnicode" / "servers.json"
 
     cfg = ConfigFile()
     s = ServerConfig(name="A", model="/m", port=1234, custom_params="--kv-bits 4")

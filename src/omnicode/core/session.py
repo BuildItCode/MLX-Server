@@ -194,6 +194,15 @@ class Session:
         root) and ask the frontend to open it. Headless backends without an ``open_url`` handler
         just report the resolved URL."""
         target = args.get("path") or args.get("url") or ""
+        if target.strip().lower().startswith(("http://", "https://")):
+            # Web/browser actions are playwright-only: opening web URLs in the user's
+            # OS browser is forbidden. open_in_browser is for local files only.
+            return ToolOutcome(
+                "error: opening http(s) URLs with open_in_browser is not allowed. "
+                "Use the Playwright MCP tools (mcp__playwright__browser_navigate, "
+                "browser_snapshot, …) for every web/browser action.",
+                ok=False,
+            )
         try:
             url = fs.resolve_browser_target(root, target)
         except ValueError as exc:

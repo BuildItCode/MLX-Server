@@ -1,7 +1,7 @@
 """The consolidated inbound protocol layer: one extract_tool_calls() that reads a tool call out of
 a model reply regardless of how it was expressed (native / Harmony / MiniMax / Hermes / loose)."""
 
-from mlx_launcher.chat.tool_calls import extract_tool_calls
+from omnicode.chat.tool_calls import extract_tool_calls
 
 NAMES = ["read_file", "list_directory", "web_search"]
 

@@ -1,0 +1,9 @@
+- generic [active] [ref=f1e1]:
+  - heading "Playwright MCP probe" [level=1] [ref=f1e2]
+  - button "Click me" [ref=f1e3]
+  - textbox "type here" [ref=f1e4]
+  - combobox [ref=f1e5]:
+    - option "Alpha" [selected]
+    - option "Beta"
+  - link "Jump link" [ref=f1e6] [cursor=pointer]:
+    - /url: "#anchor"

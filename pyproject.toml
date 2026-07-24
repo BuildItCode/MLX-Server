@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "mlx-launcher"
+name = "omnicode"
 version = "0.1.2"
-description = "LIS (Local Inference Server) — a TUI to launch and manage local model servers (MLX + llama.cpp), with Xcode 27 OpenAI-provider + ACP integration."
+description = "omnicode — a TUI to launch and manage local model servers (MLX + llama.cpp), with Xcode 27 OpenAI-provider + ACP integration."
 readme = "README.md"
 requires-python = ">=3.10,<3.15"
 license = { text = "MIT" }
@@ -21,6 +21,9 @@ dependencies = [
     "ddgs>=9.0",
     "pypdf>=4.0",
     "huggingface_hub>=0.34,<2",
+    # Agent loop: deepagents (LangChain/LangGraph) provides subagents, tools, memory,
+    # and context management. Brings langchain-core + langgraph as transitive deps.
+    "deepagents>=0.6,<1",
     # Local backend service (HTTP + SSE). Pure-Python, async — the backend the frontends drive.
     "starlette>=0.37",
     "sse-starlette>=2.0",
@@ -46,12 +49,12 @@ voice = [
 ]
 
 [project.scripts]
-lis-start = "mlx_launcher.app:run"
-mlx-acp-agent = "mlx_launcher.acp.entry:main"
-lis-backend = "mlx_launcher.core.server_main:main"
+omnicode = "omnicode.app:run"
+mlx-acp-agent = "omnicode.acp.entry:main"
+omnicode-backend = "omnicode.core.server_main:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/mlx_launcher"]
+packages = ["src/omnicode"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

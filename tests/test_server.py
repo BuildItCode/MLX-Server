@@ -1,11 +1,11 @@
 import socket
 
-from mlx_launcher.server import discovery
+from omnicode.server import discovery
 
 
 def test_exit_message_unsupported_architecture():
-    from mlx_launcher.config.models import ServerConfig
-    from mlx_launcher.server.manager import ServerManager
+    from omnicode.config.models import ServerConfig
+    from omnicode.server.manager import ServerManager
 
     mgr = ServerManager(ServerConfig(model="/m", port=8080))
     mgr.log_buffer.append(("stderr", "ValueError: Model type step3p7 not supported."))
@@ -15,8 +15,8 @@ def test_exit_message_unsupported_architecture():
 
 
 def test_exit_message_unsupported_architecture_vlm_engine():
-    from mlx_launcher.config.models import ServerConfig
-    from mlx_launcher.server.manager import ServerManager
+    from omnicode.config.models import ServerConfig
+    from omnicode.server.manager import ServerManager
 
     mgr = ServerManager(ServerConfig(model="/m", engine="mlx-vlm"))
     mgr.log_buffer.append(("stderr", "ValueError: Model type llava_next not supported."))
@@ -31,8 +31,8 @@ def test_binary_name_maps_engines():
 
 
 def test_exit_message_generic_fallback():
-    from mlx_launcher.config.models import ServerConfig
-    from mlx_launcher.server.manager import ServerManager
+    from omnicode.config.models import ServerConfig
+    from omnicode.server.manager import ServerManager
 
     mgr = ServerManager(ServerConfig(model="/m"))
     mgr.log_buffer.append(("stderr", "RuntimeError: something else"))
@@ -42,8 +42,8 @@ def test_exit_message_generic_fallback():
 def test_start_is_a_noop_when_already_running(monkeypatch):
     import asyncio
 
-    from mlx_launcher.config.models import ServerConfig
-    from mlx_launcher.server.manager import ServerManager
+    from omnicode.config.models import ServerConfig
+    from omnicode.server.manager import ServerManager
 
     mgr = ServerManager(ServerConfig(model="/m", port=8080))
 
@@ -65,8 +65,8 @@ def test_start_is_a_noop_when_already_running(monkeypatch):
 
 
 def test_is_alive_is_false_without_a_process():
-    from mlx_launcher.config.models import ServerConfig
-    from mlx_launcher.server.manager import ServerManager
+    from omnicode.config.models import ServerConfig
+    from omnicode.server.manager import ServerManager
 
     assert ServerManager(ServerConfig(model="/m")).is_alive() is False
 
@@ -107,8 +107,8 @@ def test_resolve_gguf_passes_through_files_and_repos(tmp_path):
 
 
 def test_exit_message_gguf_load_error():
-    from mlx_launcher.config.models import ServerConfig
-    from mlx_launcher.server.manager import ServerManager
+    from omnicode.config.models import ServerConfig
+    from omnicode.server.manager import ServerManager
 
     mgr = ServerManager(ServerConfig(model="/m.gguf", engine="llama-cpp"))
     mgr.log_buffer.append(("stderr", "error loading model: failed to load model from '/m.gguf'"))
@@ -118,7 +118,7 @@ def test_exit_message_gguf_load_error():
 
 def test_spawn_kwargs_per_platform(monkeypatch):
     # a child must spawn into its own group on every OS: POSIX session / Windows group
-    import mlx_launcher._util as u
+    import omnicode._util as u
 
     monkeypatch.setattr(u.sys, "platform", "linux")
     assert u.process_group_kwargs() == {"start_new_session": True}
@@ -131,9 +131,9 @@ def test_spawn_kwargs_per_platform(monkeypatch):
 
 def test_is_alive_windows_uses_returncode_not_os_kill(monkeypatch):
     # os.kill(pid, 0) TERMINATES the process on Windows — is_alive must never call it there.
-    import mlx_launcher.server.manager as m
-    from mlx_launcher.config.models import ServerConfig
-    from mlx_launcher.server.manager import ServerManager
+    import omnicode.server.manager as m
+    from omnicode.config.models import ServerConfig
+    from omnicode.server.manager import ServerManager
 
     monkeypatch.setattr(m.sys, "platform", "win32")
     monkeypatch.setattr(m.os, "kill", lambda *a: (_ for _ in ()).throw(AssertionError("os.kill on win32")))
@@ -150,7 +150,7 @@ def test_is_alive_windows_uses_returncode_not_os_kill(monkeypatch):
 
 
 def test_terminate_and_kill_route_per_platform_on_windows(monkeypatch):
-    import mlx_launcher._util as u
+    import omnicode._util as u
 
     monkeypatch.setattr(u.sys, "platform", "win32")
     monkeypatch.setattr(u.os, "killpg", lambda *a: (_ for _ in ()).throw(AssertionError("killpg on win32")))

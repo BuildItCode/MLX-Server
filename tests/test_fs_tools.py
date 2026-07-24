@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from mlx_launcher.chat import fs_tools
+from omnicode.chat import fs_tools
 
 
 def test_resolve_browser_target_confines_and_checks_existence(tmp_path):

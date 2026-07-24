@@ -10,7 +10,7 @@ import asyncio
 
 
 def _append_reply(chats_store, chat_id):
-    from mlx_launcher.models import ChatMessage
+    from omnicode.models import ChatMessage
 
     def mutate(f):
         c = chats_store.get_chat(f, chat_id)
@@ -23,11 +23,11 @@ def test_resync_picks_up_persisted_turns_and_stays_attached(tmp_path, monkeypatc
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
     async def go():
-        from mlx_launcher.app import MlxLauncherApp
-        from mlx_launcher.core.persistence import chats as chats_store
-        from mlx_launcher.screens.chat import ChatScreen
+        from omnicode.app import OmniCodeApp
+        from omnicode.core.persistence import chats as chats_store
+        from omnicode.screens.chat import ChatScreen
 
-        app = MlxLauncherApp()
+        app = OmniCodeApp()
         async with app.run_test(size=(140, 40)) as pilot:
             await pilot.pause(0.2)
             await app.push_screen(ChatScreen())
@@ -49,11 +49,11 @@ def test_creating_a_chat_does_not_clobber_prior_persisted_turns(tmp_path, monkey
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
     async def go():
-        from mlx_launcher.app import MlxLauncherApp
-        from mlx_launcher.core.persistence import chats as chats_store
-        from mlx_launcher.screens.chat import ChatScreen
+        from omnicode.app import OmniCodeApp
+        from omnicode.core.persistence import chats as chats_store
+        from omnicode.screens.chat import ChatScreen
 
-        app = MlxLauncherApp()
+        app = OmniCodeApp()
         async with app.run_test(size=(140, 40)) as pilot:
             await pilot.pause(0.2)
             await app.push_screen(ChatScreen())

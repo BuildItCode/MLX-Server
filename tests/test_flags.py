@@ -1,5 +1,5 @@
-from mlx_launcher.config.flags import build_args, build_argv, preview_command
-from mlx_launcher.config.models import ServerConfig
+from omnicode.config.flags import build_args, build_argv, preview_command
+from omnicode.config.models import ServerConfig
 
 
 def test_unset_optional_flags_are_omitted():

@@ -1,5 +1,5 @@
-from mlx_launcher.chat import fs_tools
-from mlx_launcher.chat import prompted_tools as pt
+from omnicode.chat import fs_tools
+from omnicode.chat import prompted_tools as pt
 
 
 def test_parse_single_tool_call_and_strip():
@@ -33,8 +33,9 @@ def test_parse_none_and_fenced_fallback():
 def test_tool_instructions_describe_the_protocol_and_tools():
     instr = pt.tool_instructions(fs_tools.fs_specs())
     assert "<tool_call>" in instr and "<tool_response>" in instr  # protocol explained
-    assert "write_file(path, content)" in instr  # required args, no '?'
-    assert "list_directory(path?)" in instr  # optional arg marked '?'
+    # Required args shown WITHOUT '?', WITH type annotations (path: str, not path)
+    assert "write_file(path: str, content: str)" in instr  # required args, no '?'
+    assert "list_directory(path?: str)" in instr  # optional arg marked '?' with type
     assert "read_file" in instr and "run_command" in instr
 
 

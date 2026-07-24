@@ -1,16 +1,16 @@
 """Test harness: give the app an in-process backend.
 
-The frontend reaches the backend only through ``mlx_launcher.client``. In tests we patch
+The frontend reaches the backend only through ``omnicode.client``. In tests we patch
 ``client.connect`` to return a :class:`BackendClient` wired to an in-process Starlette app
-(``httpx.ASGITransport``) instead of spawning a real ``lis-backend`` process. The service reads the
+(``httpx.ASGITransport``) instead of spawning a real ``omnicode-backend`` process. The service reads the
 test's ``XDG_CONFIG_HOME`` store, so screens that list/edit data or drive runs work hermetically —
 no subprocess, no network, same event loop."""
 
 import httpx
 import pytest
 
-import mlx_launcher.client as client_mod
-from mlx_launcher.core.service import create_app
+import omnicode.client as client_mod
+from omnicode.core.service import create_app
 
 
 @pytest.fixture(autouse=True)

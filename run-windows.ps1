@@ -42,8 +42,8 @@ if (-not $venvOk) {
   & $parts[0] @($parts[1..($parts.Length - 1)]) -m venv $Venv
 }
 
-# Gate on lis-backend (the newer entry point) so an older install reinstalls + gets its new deps.
-$backend = Join-Path $Venv "Scripts\lis-backend.exe"
+# Gate on omnicode-backend (the newer entry point) so an older install reinstalls + gets its new deps.
+$backend = Join-Path $Venv "Scripts\omnicode-backend.exe"
 if ($Reinstall -or -not (Test-Path $backend)) {
   Write-Host "Installing dependencies (this runs only when needed) ..."
   & $vpy -m pip install --quiet --upgrade pip
@@ -54,6 +54,6 @@ if (-not (Get-Command llama-server -ErrorAction SilentlyContinue)) {
   Write-Host "NOTE: llama-server not found - run .\install-windows.ps1 or install llama.cpp first."
 }
 
-# Launch the TUI (lis-start) — NOT lis-backend, which is only the dependency-gate sentinel above.
-$start = Join-Path $Venv "Scripts\lis-start.exe"
+# Launch the TUI (omnicode) — NOT omnicode-backend, which is only the dependency-gate sentinel above.
+$start = Join-Path $Venv "Scripts\omnicode.exe"
 & $start @args

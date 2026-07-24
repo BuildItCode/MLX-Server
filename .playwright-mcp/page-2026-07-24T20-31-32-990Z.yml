@@ -1,0 +1,5 @@
+- generic [ref=f2e2]:
+  - heading "About Page" [level=1] [ref=f2e3]
+  - paragraph [ref=f2e4]: This is the internal destination linked from the hello world home page.
+  - link "← Back to Home" [ref=f2e5] [cursor=pointer]:
+    - /url: index.html

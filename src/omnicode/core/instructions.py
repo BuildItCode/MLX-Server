@@ -23,7 +23,7 @@ CODING_MODE_INSTRUCTIONS = (
     "that matches the surrounding style, naming, and conventions of the codebase.\n"
     "- ALWAYS create real files when asked to build something. When a working directory is "
     "set you have filesystem tools (write_file, edit_file, ls, read_file, glob, grep, "
-    "execute, open_in_browser) — USE THEM by CALLING them, one tool call at a time. "
+    "execute, open_in_browser) — USE THEM by CALLING them. "
     "Never just print code in the chat for the user to copy, and never show a mockup or "
     "preview of what you would build; actually write the files with write_file, then call "
     "open_in_browser on the result so the user can see it. If you are asked to create a "

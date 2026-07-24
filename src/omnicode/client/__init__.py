@@ -49,6 +49,12 @@ class BackendClient:
         self.base_url = base_url.rstrip("/")
         self._token = token
         self._transport = transport
+        # The pid/port of the backend this client is connected to, when it was found
+        # through the discovery file or spawned by us — lets a frontend shut it down
+        # cleanly on quit (SIGTERM → the lifespan stops model servers and removes
+        # backend.json). None for hand-constructed clients (tests, foreign backends).
+        self.pid: Optional[int] = None
+        self.port: Optional[int] = None
 
     def _new(self, **kw) -> httpx.AsyncClient:
         headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
@@ -173,6 +179,49 @@ class BackendClient:
     async def patch_settings(self, changes: dict) -> dict:
         return await self._send("PATCH", "/settings", changes)
 
+    # --- lifecycle ---------------------------------------------------------
+
+    async def terminate_backend(self, *, timeout: float = 5.0) -> bool:
+        """SIGTERM the backend this client is connected to, if we know its pid.
+
+        Returns True once the backend stops answering (or was already gone). Refuses to
+        signal anything when the discovery file no longer names this exact pid+port — a
+        newer backend may have replaced the one we connected to, and killing THAT would
+        be worse than leaving our own one running.
+
+        Liveness is probed via ``/healthz``, NOT signal-0 on the pid: a child that just
+        exited lingers as a zombie (kill(pid, 0) still succeeds on macOS/Linux), while
+        uvicorn closes its listener the moment shutdown begins. SIGTERM is enough for a
+        clean shutdown — uvicorn runs the lifespan, which stops model-server
+        subprocesses and removes ``backend.json`` (see core.service.create_app).
+        """
+        pid = self.pid
+        if pid is None or not isinstance(pid, int) or pid <= 1:
+            # pid=0 signals the caller's process group; negative pids signal a group too.
+            # Reject anything that isn't a positive integer > 1 (init is pid 1).
+            return False
+        info = read_backend_info() or {}
+        if info.get("pid") != pid or (self.port is not None and info.get("port") != self.port):
+            return False  # the file names a different backend — not ours to kill
+        import signal
+
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            return not await _healthy(info, timeout=0.5)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not await _healthy(info, timeout=0.5):
+                return True
+            await asyncio.sleep(0.15)
+        if os.name == "posix" and _pid_alive(pid):  # it hung in shutdown — force it
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            await asyncio.sleep(0.2)
+        return not await _healthy(info, timeout=0.5)
+
     # --- SSE -------------------------------------------------------------
 
     async def _sse(self, path: str) -> AsyncIterator[tuple[str, dict]]:
@@ -195,6 +244,20 @@ class BackendClient:
 
 # --- discovery / spawn ---------------------------------------------------
 
+def _pid_alive(pid: int) -> bool:
+    """True while ``pid`` still exists (signal-0 probe). Windows has no signal 0, so
+    fall back to assuming alive there — terminate_backend's SIGTERM waits are bounded."""
+    if os.name != "posix":
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but owned by someone else
+    return True
+
+
 async def _healthy(info: dict, *, timeout: float = 2.0) -> bool:
     try:
         client = BackendClient(f"http://127.0.0.1:{info['port']}", info.get("token"))
@@ -209,7 +272,10 @@ async def discover() -> Optional[BackendClient]:
     """Return a client for a healthy already-running backend, or None."""
     info = read_backend_info()
     if info and "port" in info and await _healthy(info):
-        return BackendClient(f"http://127.0.0.1:{info['port']}", info.get("token"))
+        client = BackendClient(f"http://127.0.0.1:{info['port']}", info.get("token"))
+        client.pid = info.get("pid")
+        client.port = info["port"]
+        return client
     return None
 
 
@@ -226,7 +292,8 @@ async def spawn(*, wait: float = 20.0) -> BackendClient:
             raise BackendError(f"omnicode-backend exited early (code {proc.returncode})")
         client = await discover()
         if client is not None:
-            return client
+            client.pid = proc.pid  # the child we just started — exact, even if the
+            return client          # discovery file was written by a racing spawn
         await asyncio.sleep(0.2)
     proc.terminate()
     raise BackendError("omnicode-backend did not become healthy in time")

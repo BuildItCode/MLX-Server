@@ -4,8 +4,8 @@ chat mic / read-aloud wiring. All hermetic — no audio hardware, no optional de
 
 import importlib.util
 
-from mlx_launcher import bootstrap
-from mlx_launcher.chat import voice
+from omnicode import bootstrap
+from omnicode.chat import voice
 
 
 # --- pure helpers ---------------------------------------------------------
@@ -135,12 +135,12 @@ def test_voice_packages_non_arm_uses_faster_whisper(monkeypatch):
 # --- chat screen wiring (unit, no full mount) ----------------------------
 
 def _bare_screen():
-    from mlx_launcher.screens.chat import ChatScreen
+    from omnicode.screens.chat import ChatScreen
     return ChatScreen.__new__(ChatScreen)
 
 
 def test_last_assistant_text_returns_most_recent_reply():
-    from mlx_launcher.chat.models import Chat, ChatMessage
+    from omnicode.chat.models import Chat, ChatMessage
     cs = _bare_screen()
     cs.chat = Chat(title="t", model="m")
     cs.chat.messages = [
@@ -155,8 +155,8 @@ def test_last_assistant_text_returns_most_recent_reply():
 
 
 def test_maybe_autoread_speaks_only_when_enabled(monkeypatch):
-    from mlx_launcher.chat.models import Chat, ChatMessage
-    from mlx_launcher.screens.chat import ChatScreen
+    from omnicode.chat.models import Chat, ChatMessage
+    from omnicode.screens.chat import ChatScreen
 
     cs = _bare_screen()
     cs.chat = Chat(title="t", model="m")
@@ -187,7 +187,7 @@ def test_maybe_autoread_speaks_only_when_enabled(monkeypatch):
 
 
 def test_start_reading_hints_when_no_tts(monkeypatch):
-    from mlx_launcher.chat.models import Chat, ChatMessage
+    from omnicode.chat.models import Chat, ChatMessage
 
     cs = _bare_screen()
     cs.chat = Chat(title="t", model="m")
@@ -227,11 +227,11 @@ def test_chat_screen_mounts_voice_buttons(tmp_path, monkeypatch):
 
     from textual.widgets import Button
 
-    from mlx_launcher.app import MlxLauncherApp
-    from mlx_launcher.screens.chat import ChatScreen
+    from omnicode.app import OmniCodeApp
+    from omnicode.screens.chat import ChatScreen
 
     async def go():
-        app = MlxLauncherApp()
+        app = OmniCodeApp()
         async with app.run_test(size=(140, 40)) as pilot:
             await pilot.pause(0.2)
             await app.push_screen(ChatScreen())

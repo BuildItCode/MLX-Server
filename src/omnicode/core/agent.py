@@ -187,7 +187,9 @@ class AgentRunner:
         )
 
         final_text = ""
-        async for event in run_turn(agent, capture, messages, cancel=self._cancel):
+        async for event in run_turn(agent, capture, messages,
+                                    max_iters=self.policy.max_iters,
+                                    cancel=self._cancel):
             yield event
             if isinstance(event, ev.TurnFinished):
                 final_text = event.text

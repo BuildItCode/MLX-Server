@@ -12,7 +12,7 @@ from acp.schema import (
     WriteTextFileResponse,
 )
 
-from mlx_launcher.acp.agent import MlxAcpAgent
+from omnicode.acp.agent import MlxAcpAgent
 
 BASE = "http://127.0.0.1:8080/v1"
 CHAT = BASE + "/chat/completions"

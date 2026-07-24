@@ -96,8 +96,10 @@ def fs_specs() -> list[dict]:
         spec("run_command", "Run a shell command in the working directory; returns its combined stdout/stderr.",
              {"command": {"type": "string"}}, ["command"]),
         spec("open_in_browser",
-             "Open a file you created (e.g. an HTML page) or an http(s) URL in the user's web browser "
-             "so they can see it. Use this after building something viewable.",
+             "Open a LOCAL FILE you created in the working directory (e.g. an HTML page) in the "
+             "user's web browser so they can see it. Do NOT pass an http(s) URL — opening web "
+             "pages is forbidden here; all web/browser actions must use the Playwright MCP tools "
+             "(mcp__playwright__browser_*) instead. http(s) targets are rejected.",
              {"path": {"type": "string",
                        "description": "a file path relative to the working directory, or an http(s):// URL"}},
              ["path"]),

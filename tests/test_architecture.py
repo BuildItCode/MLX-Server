@@ -14,30 +14,30 @@ tracked separately and intentionally not asserted here.)"""
 import ast
 import pathlib
 
-SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "mlx_launcher"
+SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "omnicode"
 _LAYERS = {"engine", "core", "client", "models", "screens", "acp", "chat", "config", "server"}
 
 
 def _imported_subpackages(pyfile: pathlib.Path) -> set[str]:
-    """The set of ``mlx_launcher.<subpkg>`` names this file imports, resolving relative imports
+    """The set of ``omnicode.<subpkg>`` names this file imports, resolving relative imports
     against the file's own package."""
     rel = pyfile.relative_to(SRC).with_suffix("")
-    pkg_parts = ["mlx_launcher", *rel.parts[:-1]]
+    pkg_parts = ["omnicode", *rel.parts[:-1]]
     out: set[str] = set()
     tree = ast.parse(pyfile.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name.startswith("mlx_launcher."):
+                if alias.name.startswith("omnicode."):
                     out.add(alias.name.split(".")[1])
         elif isinstance(node, ast.ImportFrom):
             if node.level == 0:
-                if node.module and node.module.startswith("mlx_launcher."):
+                if node.module and node.module.startswith("omnicode."):
                     out.add(node.module.split(".")[1])
             else:  # relative: resolve against this file's package
                 base = pkg_parts[: len(pkg_parts) - (node.level - 1)]
                 full = [*base, *(node.module.split(".") if node.module else [])]
-                if len(full) >= 2 and full[0] == "mlx_launcher":
+                if len(full) >= 2 and full[0] == "omnicode":
                     out.add(full[1])
     return {s for s in out if s in _LAYERS}
 

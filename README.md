@@ -1,4 +1,4 @@
-# LIS — Local Inference Server
+# omnicode
 
 A Claude-Code-styled terminal app (TUI) to launch and manage local model servers — then chat
 with them or wire them into Xcode 27. It drives four interchangeable backends:
@@ -8,7 +8,7 @@ with them or wire them into Xcode 27. It drives four interchangeable backends:
 (`llama-server`, GGUF models) on **macOS, Linux, or Windows**.
 
 <p align="center">
-  <img src="preview.png" alt="LIS chat UI — projects/chats sidebar, skill and server pickers, context bar, and build/plan/auto mode + reason/web/tools toggles" width="820">
+  <img src="preview.png" alt="omnicode chat UI — projects/chats sidebar, skill and server pickers, context bar, and build/plan/auto mode + reason/web/tools toggles" width="820">
 </p>
 
 - **Pick the engine** per profile: **mlx-lm** (text), **mlx-vlm** (vision-language),
@@ -64,7 +64,7 @@ with them or wire them into Xcode 27. It drives four interchangeable backends:
 - **Talk to it** (optional): a **🎙 Mic** button transcribes your speech into the prompt
   (Whisper — `mlx-whisper` on Apple Silicon, `faster-whisper` elsewhere) and a **🔊 Read aloud**
   button speaks the last reply (Kokoro-82M via `kokoro-onnx`, with the system voice as a
-  fallback). All local, no API keys. Enable with `pip install "mlx-launcher[voice]"` (or the
+  fallback). All local, no API keys. Enable with `pip install "omnicode[voice]"` (or the
   **Install voice** button on the setup screen). Auto-send-after-mic and auto-read-replies are
   opt-in settings.
 - **Dependency self-check**: detects which engine binaries are on your `PATH`
@@ -89,11 +89,11 @@ engine binaries are on your `PATH` and offers to install the ones you're missing
 ./install.sh                                                     # macOS
 ./install-linux.sh                                              # Linux
 powershell -ExecutionPolicy Bypass -File .\install-windows.ps1   # Windows
-lis-start                                                            # then launch from anywhere
+omnicode                                                            # then launch from anywhere
 ```
 
 Each script installs the launcher (pipx if available, else a local `.venv` + `~/.local/bin`
-symlinks) and exposes the `lis-start` command. The **Linux** and **Windows** scripts also fetch a
+symlinks) and exposes the `omnicode` command. The **Linux** and **Windows** scripts also fetch a
 prebuilt **`llama-server`** from the llama.cpp releases — MLX is Apple-Silicon-only, so
 llama.cpp is the engine on those platforms.
 
@@ -104,9 +104,9 @@ llama.cpp is the engine on those platforms.
 powershell -ExecutionPolicy Bypass -File .\uninstall-windows.ps1  # Windows
 ```
 
-Removes the global command — both the old `mlxs` / `mlx-launcher` and the new `lis-start` —
+Removes the global command — both the old `mlxs` / `omnicode` and the new `omnicode` —
 along with the pipx install and the local `.venv`. Your server profiles and chats
-(`~/.config/mlx-launcher/`) are kept; add `--purge` (`-Purge` on Windows) to delete those too.
+(`~/.config/omnicode/`) are kept; add `--purge` (`-Purge` on Windows) to delete those too.
 The model engines (MLX / llama.cpp) are left installed.
 
 ## Requirements
@@ -117,7 +117,7 @@ The model engines (MLX / llama.cpp) are left installed.
   - **mlx-lm / mlx-vlm / vllm-mlx** — installed via `uv tool` or the in-app setup (`p`).
   - **llama.cpp** (`llama-server`) — `brew install llama.cpp` on macOS; the Linux/Windows
     install scripts fetch a prebuilt binary for you.
-- **Voice (optional)** — for the chat mic / read-aloud buttons: `pip install "mlx-launcher[voice]"`
+- **Voice (optional)** — for the chat mic / read-aloud buttons: `pip install "omnicode[voice]"`
   (`sounddevice` + `numpy` + `kokoro-onnx`, plus `mlx-whisper` on Apple Silicon / `faster-whisper`
   elsewhere). The Kokoro voice model (~325 MB) downloads once on first use. Read-aloud also works
   without the extra via the OS voice (macOS `say` / `espeak-ng`).

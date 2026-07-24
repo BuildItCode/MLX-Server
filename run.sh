@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bootstrap (create venv + install) and launch the LIS (Local Inference Server) TUI.
+# Bootstrap (create venv + install) and launch the omnicode TUI.
 #   ./run.sh              # launch (installs on first run)
 #   ./run.sh --reinstall  # force a dependency reinstall, then launch
 set -euo pipefail
@@ -27,7 +27,7 @@ pick_python() {
 #  - if the base Python it was built against was upgraded/removed, `.venv/bin/python` won't run; and
 #  - venvs aren't relocatable: if `.venv` was created in another folder (e.g. the zip's
 #    `MLX-Server-main/`) and then renamed/copied here, its `activate` + console-script shebangs still
-#    point at the OLD absolute path, so `python`/`lis-start` resolve to nothing on PATH.
+#    point at the OLD absolute path, so `python`/`omnicode` resolve to nothing on PATH.
 # `activate` always names its own VIRTUAL_ENV dir, so if it no longer mentions THIS `.venv`, it moved.
 recreate=""
 if [ ! -x "$VENV/bin/python" ] || ! "$VENV/bin/python" -c '' >/dev/null 2>&1; then
@@ -49,7 +49,7 @@ if [ -n "$recreate" ] || [ ! -d "$VENV" ]; then
   "$PYTHON" -m venv "$VENV"
 fi
 
-# Use the venv's interpreter/scripts by explicit path — don't trust a bare `python`/`lis-start` on
+# Use the venv's interpreter/scripts by explicit path — don't trust a bare `python`/`omnicode` on
 # PATH (activation can be a no-op in odd shells, and a global lis-* could mask the venv's).
 VPY="$VENV/bin/python"
 # shellcheck disable=SC1091
@@ -61,13 +61,13 @@ if [ "${1:-}" = "--reinstall" ]; then
   shift
 fi
 
-# Gate on the venv's own lis-backend (the newer entry point): a missing one means a fresh venv or an
+# Gate on the venv's own omnicode-backend (the newer entry point): a missing one means a fresh venv or an
 # install predating the backend split, so (re)install to pick up its new deps (starlette/uvicorn/…).
-# Check the file directly, not PATH, so a global lis-backend can't mask a venv that still needs it.
-if [ "$reinstall" -eq 1 ] || [ ! -x "$VENV/bin/lis-backend" ]; then
+# Check the file directly, not PATH, so a global omnicode-backend can't mask a venv that still needs it.
+if [ "$reinstall" -eq 1 ] || [ ! -x "$VENV/bin/omnicode-backend" ]; then
   echo "Installing dependencies (this runs only when needed) ..."
   "$VPY" -m pip install --quiet --upgrade pip
   "$VPY" -m pip install --quiet -e "$HERE"
 fi
 
-exec "$VENV/bin/lis-start" "$@"
+exec "$VENV/bin/omnicode" "$@"

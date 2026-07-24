@@ -1,7 +1,7 @@
 import json
 
-from mlx_launcher.config.models import ServerConfig
-from mlx_launcher.xcode import helpers
+from omnicode.config.models import ServerConfig
+from omnicode.xcode import helpers
 
 
 def test_openai_provider():

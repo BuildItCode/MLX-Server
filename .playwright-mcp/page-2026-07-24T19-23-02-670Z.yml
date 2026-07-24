@@ -1,0 +1,4 @@
+- generic [ref=e7]:
+  - paragraph [ref=e8]: This is the internal destination section.
+  - link "Back to Top" [ref=e9] [cursor=pointer]:
+    - /url: "#top"

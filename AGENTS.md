@@ -1,4 +1,4 @@
-# AGENTS.md — working on LIS (Local Inference Server)
+# AGENTS.md — working on omnicode
 
 Guidance for AI coding agents and human contributors working on **this repository**. (Not to
 be confused with the per-project `AGENTS.md` the app itself reads when you point a chat at a
@@ -21,39 +21,39 @@ inward (enforced by `tests/test_architecture.py`):
   `Engine` protocol) plus all format‑quirk handling (Harmony / `<think>` parsing, tool‑call
   extraction in every dialect, the prompted‑protocol fallback, model‑capability heuristics).
   Swap the model server via `base_url`; depends only on `models/`.
-- **`core/`** — the **backend**: the *one* unified agent loop (`core/agent.py:AgentRunner`, which
-  replaced the three copies that used to live in the frontends), sessions, tool execution
+- **`core/`** — the **backend**: the *one* unified agent loop (`core/agent.py:AgentRunner`, now
+  powered by `langchain-ai/deepagents` via `core/deepagents/`), sessions, tool execution
   (web/fs/MCP), token budgeting + compaction, persistence (single‑writer `mutate()`), the
   model‑server supervisor, and a local **HTTP + SSE service** (`core/service.py`, run via
-  `lis-backend`). Depends only on `engine/` + `models/`; never imports a frontend.
+  `omnicode-backend`). Depends only on `engine/` + `models/`; never imports a frontend.
 - **`client/`** — the thin REST + SSE wire client (`BackendClient`) both frontends use to drive the
   backend; reaches it over the documented contract only (never imports `engine`/`core`).
 - **frontends** — the Textual TUI (`screens/`, `app.py`) and the ACP agent (`acp/`). The TUI's
-  chat generates over HTTP+SSE against `lis-backend`; the ACP agent and the TUI subagent pane drive
+  chat generates over HTTP+SSE against `omnicode-backend`; the ACP agent and the TUI subagent pane drive
   `AgentRunner` directly. Old import paths (`chat/*`, `config/*`, `server/*`) remain as thin
   re-export **shims** over the new layers, so existing imports keep working.
 
-A third console script, **`lis-backend`** (`mlx_launcher.core.server_main:main`), runs the service
-on an ephemeral `127.0.0.1` port and writes `~/.config/mlx-launcher/backend.json`
+A third console script, **`omnicode-backend`** (`omnicode.core.server_main:main`), runs the service
+on an ephemeral `127.0.0.1` port and writes `~/.config/omnicode/backend.json`
 (`{pid, port, token}`) for discovery; the TUI spawns/discovers it lazily on the first chat run.
 
 **What runs over the wire vs. locally.** All agent logic + inference is over the wire: the TUI's
-main chat and `/compact` drive `lis-backend` (the backend owns the loop, tools, permissions,
+main chat and `/compact` drive `omnicode-backend` (the backend owns the loop, tools, permissions,
 persistence, and the OpenAI engine). The Xcode ACP agent and the TUI subagent side-pane drive the
 same `core.AgentRunner` **in-process** (they are embedded backend-drivers, not pure wire clients).
 The config/launcher screens (dashboard, editor, MCP/skills/project/subagent managers) and the
 model-server launch flow (`running.py`, the chat server-switch) read/write the **shared on-disk
 store** and use a **local `ServerManager`** — deliberately, since both the TUI and the backend open
-the same `~/.config/mlx-launcher/` files and the backend already mirrors the same resource +
+the same `~/.config/omnicode/` files and the backend already mirrors the same resource +
 model-server lifecycle over its REST/SSE API (`/servers/*`, `/projects`, …) for *other* frontends.
 A non-TUI frontend uses only the wire API; the bundled TUI shares the local store for its config UIs.
 
 - **Stack:** Python 3.10–3.14, [Textual](https://textual.textualize.io) (TUI), httpx,
   pydantic v2, and the `mcp`, `ddgs`, `pypdf`, and `agent-client-protocol` (`acp`) libraries.
-- **Entry points** (`pyproject.toml` `[project.scripts]`): `lis-start`
-  (`mlx_launcher.app:run`, the TUI) and `mlx-acp-agent` (`mlx_launcher.acp.entry:main`, the
-  stdio ACP agent Xcode launches). The Python package / distribution stays `mlx_launcher`,
-  and the config dir stays `~/.config/mlx-launcher/` (renaming it would orphan user data).
+- **Entry points** (`pyproject.toml` `[project.scripts]`): `omnicode`
+  (`omnicode.app:run`, the TUI) and `mlx-acp-agent` (`omnicode.acp.entry:main`, the
+  stdio ACP agent Xcode launches). The Python package / distribution stays `omnicode`,
+  and the config dir stays `~/.config/omnicode/` (renaming it would orphan user data).
 - **Pure-Python deps only.** The model runtimes (mlx-lm, mlx-vlm, vllm-mlx, llama.cpp) are
   **external binaries** installed separately and resolved on `PATH` — they are never imported.
 
@@ -99,7 +99,7 @@ gating (`screens/editor.py`); a setup detect/install entry (`screens/setup.py` +
   stop), `discovery.py` (locate binaries, port checks, GGUF path resolution), `readiness.py`
   (HTTP `/health` + `/v1/models` probe).
 - `config/` — `models.py` (`ServerConfig` + settings, pydantic), `flags.py` (the argv
-  builder), `store.py` (atomic JSON at `~/.config/mlx-launcher/servers.json`).
+  builder), `store.py` (atomic JSON at `~/.config/omnicode/servers.json`).
 - `chat/` — the chat engine: `client.py` (streaming, `<think>`/Harmony parsing, tool-call
   recovery), `acp/bridge.py` (HTTP to the OpenAI API), `tools.py` (web_search), `fs_tools.py`
   (sandboxed file tools), `mcp_client.py` (MCP sessions), `prompted_tools.py` (prompted
@@ -118,9 +118,9 @@ gating (`screens/editor.py`); a setup detect/install entry (`screens/setup.py` +
 ```
 
 - Tests are **hermetic and offline** — no network, no real servers. Anything that boots the
-  full app (`MlxLauncherApp().run_test()`) MUST first set
+  full app (`OmniCodeApp().run_test()`) MUST first set
   `monkeypatch.setenv("XDG_CONFIG_HOME", tmp_path)`, or it reads/writes the user's real
-  `~/.config/mlx-launcher/` (the chat screen opens the most-recent real chat and persists to
+  `~/.config/omnicode/` (the chat screen opens the most-recent real chat and persists to
   it). There is a real-`llama-server` smoke path used during development, but the committed
   suite never depends on a model.
 - The MLX engines run under a **separate interpreter** (installed via `uv tool` / Homebrew),
@@ -140,8 +140,12 @@ gating (`screens/editor.py`); a setup detect/install entry (`screens/setup.py` +
   500.
 - **Tool calling is native-first with a prompted-protocol fallback** (`chat/prompted_tools.py`),
   and gpt-oss/Harmony tool calls are recovered from raw text (`chat/client.py`:
-  `parse_harmony*`, `recover_*`). These recoveries are deliberately conservative to avoid
-  treating prose as a call — don't loosen the regexes without re-running the tests.
+  `parse_harmony*`, `recover_*`). The agent loop is now powered by `deepagents`
+  (`core/deepagents/`): `EngineChatModel` wraps the OpenAI Engine as a LangChain `BaseChatModel`
+  (preserving the native→prompted fallback and format recovery), `ExecutorTool` wraps the
+  existing tool specs as LangChain tools, and `build_agent()` + `run_turn()` translate between
+  LangGraph's event stream and omnicode's event contract. No-tools chats still use direct
+  `engine.stream_chat()` for live token streaming; only tool-enabled chats go through deepagents.
 - **Per-pane chat concurrency.** The chat runs a main pane + an optional subagent side pane
   with independent generation state (`_gen` / `_cancel_flags` dicts keyed `"main"`/`"side"`).
   Don't reintroduce screen-wide streaming state.

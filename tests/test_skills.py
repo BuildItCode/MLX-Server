@@ -1,8 +1,8 @@
 import pytest
 
-from mlx_launcher.chat import skills
-from mlx_launcher.chat.client import build_openai_messages
-from mlx_launcher.chat.models import Chat, ChatMessage, Project
+from omnicode.chat import skills
+from omnicode.chat.client import build_openai_messages
+from omnicode.chat.models import Chat, ChatMessage, Project
 
 
 def test_frontmatter_inline_folded_quoted():
@@ -74,23 +74,24 @@ def test_build_messages_injects_skill_and_project():
     assert msgs[0]["role"] == "system"
     assert "SKILL GUIDANCE" in msgs[0]["content"] and "PROJECT RULES" in msgs[0]["content"]
     assert msgs[1] == {"role": "user", "content": "hi"}
-    # nothing to inject → first message is the user turn
-    assert build_openai_messages(chat)[0]["role"] == "user"
+    # a bare chat still gets the always-on coding system message
+    bare = build_openai_messages(chat)
+    assert bare[0]["role"] == "system" and "senior software engineer" in bare[0]["content"]
     # skill only (no project)
     only = build_openai_messages(chat, None, "SKILL GUIDANCE")
-    assert only[0]["role"] == "system" and only[0]["content"] == "SKILL GUIDANCE"
+    assert only[0]["role"] == "system" and "SKILL GUIDANCE" in only[0]["content"]
 
 
 def test_plan_mode_injects_instructions():
-    from mlx_launcher.chat.client import PLAN_MODE_INSTRUCTIONS
+    from omnicode.chat.client import PLAN_MODE_INSTRUCTIONS
 
     chat = Chat(mode="plan", messages=[ChatMessage(role="user", text="add a feature")])
     msgs = build_openai_messages(chat)
     assert msgs[0]["role"] == "system"
     assert "PLAN MODE" in msgs[0]["content"]
     assert PLAN_MODE_INSTRUCTIONS in msgs[0]["content"]
-    # off by default → no system message
-    assert build_openai_messages(Chat(messages=[ChatMessage(role="user", text="hi")]))[0]["role"] == "user"
+    # coding is always on → system message present even without plan mode
+    assert build_openai_messages(Chat(messages=[ChatMessage(role="user", text="hi")]))[0]["role"] == "system"
     # plan mode rides alongside a skill + project
     proj = Project(name="p", instructions="PROJECT RULES")
     combined = build_openai_messages(chat, proj, "SKILL GUIDANCE")

@@ -1,0 +1,4 @@
+- generic [active] [ref=e1]:
+  - heading "hello" [level=1] [ref=e2]
+  - link "Click me" [ref=e3] [cursor=pointer]:
+    - /url: "#x"

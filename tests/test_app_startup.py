@@ -8,8 +8,8 @@ autouse ``inproc_backend`` fixture in conftest."""
 import asyncio
 import sys
 
-from mlx_launcher.core.persistence import config as config_store
-from mlx_launcher.models import ServerConfig
+from omnicode.core.persistence import config as config_store
+from omnicode.models import ServerConfig
 
 
 def test_dashboard_paints_immediately_then_loads_servers(tmp_path, monkeypatch):
@@ -23,10 +23,10 @@ def test_dashboard_paints_immediately_then_loads_servers(tmp_path, monkeypatch):
                             host="127.0.0.1", port=8080)))
         await config_store.mutate(lambda f: setattr(f.settings, "mlx_server_path", sys.executable))
 
-        from mlx_launcher.app import MlxLauncherApp
-        from mlx_launcher.screens.dashboard import DashboardScreen, ServerItem
+        from omnicode.app import OmniCodeApp
+        from omnicode.screens.dashboard import DashboardScreen, ServerItem
 
-        app = MlxLauncherApp()
+        app = OmniCodeApp()
         async with app.run_test(size=(120, 40)) as pilot:
             # The dashboard is on screen right away — first paint did NOT wait on the backend.
             assert any(isinstance(s, DashboardScreen) for s in app.screen_stack)

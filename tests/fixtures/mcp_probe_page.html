@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html>
+<head><title>Probe Page</title></head>
+<body>
+  <h1 id="heading">Playwright MCP probe</h1>
+  <button id="btn" onclick="document.getElementById('out').textContent='clicked:'+new Date().toISOString()">Click me</button>
+  <input id="name" type="text" placeholder="type here" />
+  <select id="sel"><option value="a">Alpha</option><option value="b">Beta</option></select>
+  <a id="lnk" href="#anchor">Jump link</a>
+  <div id="out"></div>
+  <script>console.log("probe-console-message");</script>
+</body>
+</html>

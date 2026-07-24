@@ -86,14 +86,48 @@ def parse_xml_tool_calls(text: str) -> list[dict]:
     return out
 
 
+def _type_annotation(schema: dict) -> str:
+    """JSON Schema property → short type string for the model (``str``, ``int``, ``bool``, …)."""
+    _MAP = {"string": "str", "integer": "int", "number": "float",
+            "boolean": "bool", "array": "list", "object": "dict", "null": "None"}
+    return _MAP.get((schema or {}).get("type", ""), (schema or {}).get("type", ""))
+
+
 def tool_instructions(specs: list[dict]) -> str:
-    """A system-prompt block describing the tools and the call protocol."""
+    """A system-prompt block describing the tools and the call protocol.
+
+    Each tool is rendered with parameter *types* (``path: str``, ``fullPage?: bool``)
+    and inline per-parameter descriptions, so the model can emit correctly-shaped
+    arguments instead of guessing — critical for MCP servers whose schemas carry
+    rich type/enum/description metadata that was previously discarded.
+    """
     lines = [
         "# Tools",
         "You can call tools. To call one, output a tag EXACTLY like this (you may emit several):",
         '<tool_call>{"name": "<tool_name>", "arguments": {<json args>}}</tool_call>',
-        "Then STOP and wait — each result returns as a <tool_response> message. "
-        "When you are finished, reply normally with NO <tool_call> tag.",
+        "Each result returns as a <tool_response> message. When you are finished "
+        "with all steps, reply normally with NO <tool_call> tag.",
+        "",
+        "CRITICAL: a reply with no <tool_call> tag ENDS your turn — nothing further "
+        "happens until the user replies. Never narrate what you are ABOUT to do "
+        "(\"Let me click…\", \"I will now open…\") and then stop: emit the <tool_call> "
+        "tag for that action in the SAME reply, right after any prose. If your plan "
+        "has more steps, keep going — one <tool_call> per step, several tags per "
+        "reply is fine — and only write a plain reply when the whole task is done.",
+        "NEVER claim a step succeeded or report what a page/tool showed before that "
+        "step's <tool_response> has actually arrived — in a reply that contains "
+        "<tool_call> tags, prose describes WHAT you are doing, not outcomes. Your "
+        "final answer must be based ONLY on real tool results, never on what you "
+        "expected to happen.",
+        "WEB/BROWSER RULE: every web or browser action — navigating to a URL, opening "
+        "or reading a page, clicking, typing, scrolling, snapshotting, screenshotting, "
+        "or evaluating JavaScript — MUST go through the Playwright MCP tools "
+        "(mcp__playwright__browser_*). There is NO direct browser tool here: never "
+        "fetch or render pages with run_command (curl/wget), never open an http(s) URL "
+        "with open_in_browser (it opens the user's OS browser and is for local files "
+        "you created only), and never use browser tools from any non-playwright MCP "
+        "server. web_search returns search-result snippets ONLY — to open or read "
+        "anything it finds, navigate there with mcp__playwright__browser_navigate.",
         "",
         "Available tools:",
     ]
@@ -101,8 +135,23 @@ def tool_instructions(specs: list[dict]) -> str:
         fn = s.get("function") or {}
         params = (fn.get("parameters") or {}).get("properties") or {}
         required = set((fn.get("parameters") or {}).get("required") or [])
-        arglist = ", ".join(f"{k}" if k in required else f"{k}?" for k in params)
-        lines.append(f"- {fn.get('name', '?')}({arglist}): {fn.get('description', '')}")
+        # Render: path: str, fullPage?: bool  (was: path, fullPage?)
+        arg_parts = []
+        for pname, pschema in params.items():
+            ann = _type_annotation(pschema)
+            suffix = "" if pname in required else "?"
+            arg_parts.append(f"{pname}{suffix}: {ann}" if ann else f"{pname}{suffix}")
+        arglist = ", ".join(arg_parts)
+        desc = fn.get("description", "")
+        lines.append(f"- {fn.get('name', '?')}({arglist}): {desc}")
+        # Per-parameter descriptions + enum values (so the model knows what each arg expects)
+        for pname, pschema in params.items():
+            pdesc = (pschema or {}).get("description", "")
+            enum_vals = (pschema or {}).get("enum")
+            if enum_vals:
+                lines.append(f"    {pname}: one of {enum_vals}")
+            elif pdesc:
+                lines.append(f"    {pname}: {pdesc}")
     return "\n".join(lines)
 
 
@@ -118,6 +167,10 @@ def _coerce(obj: dict) -> dict | None:
             args = json.loads(args)
         except ValueError:
             args = {}
+    elif isinstance(args, list):
+        # Some models emit arguments as a positional list instead of a dict — wrap it
+        # so the call is not silently dropped (the model clearly intended to pass args).
+        args = {"items": args}
     if isinstance(name, str) and name and isinstance(args, dict):
         return {"name": name, "arguments": args}
     return None
@@ -154,5 +207,15 @@ def strip_tool_calls(text: str) -> str:
 
 
 def tool_response(name: str, result: str) -> str:
-    """Format a tool result to feed back to the model."""
+    """Format a tool result to feed back to the model.
+
+    The result text is NOT XML-escaped — the model needs to see it verbatim (code,
+    JSON, HTML, snapshot trees). A literal ``</tool_response>`` inside the result would
+    break parsing, but that string essentially never occurs in real tool output. We
+    accept the risk rather than escaping (which would make JSON/code unreadable to
+    the model) — the parser's ``re.DOTALL`` non-greedy match means only the FIRST
+    ``</tool_response>`` ends the block, so a real closing tag followed by trailing
+    content is the only failure shape, and that content is always the next turn's
+    user message which has its own role boundary.
+    """
     return f'<tool_response name="{name}">\n{result}\n</tool_response>'

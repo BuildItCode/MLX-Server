@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mlx_launcher import hf
+from omnicode import hf
 
 
 def _fake_hub(**attrs):
@@ -195,7 +195,7 @@ def test_cached_models_empty_when_cache_unreadable(monkeypatch):
 # --- editor wiring --------------------------------------------------------
 
 def test_engine_for_format():
-    from mlx_launcher.screens.editor import EditorScreen
+    from omnicode.screens.editor import EditorScreen
     cs = EditorScreen.__new__(EditorScreen)
     assert cs._engine_for_format("gguf", "mlx-lm") == "llama-cpp"
     assert cs._engine_for_format("gguf", "vllm-mlx") == "llama-cpp"
@@ -205,8 +205,8 @@ def test_engine_for_format():
 
 
 def test_apply_hf_result_sets_engine_and_model():
-    from mlx_launcher.screens.editor import EditorScreen
-    from mlx_launcher.screens.hf_browse import HFResult
+    from omnicode.screens.editor import EditorScreen
+    from omnicode.screens.hf_browse import HFResult
 
     cs = EditorScreen.__new__(EditorScreen)
     sel = SimpleNamespace(value="mlx-lm")
@@ -230,14 +230,14 @@ def test_hf_browse_gates_mlx_by_platform(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))  # hermetic
     import asyncio
 
-    from mlx_launcher.app import MlxLauncherApp
-    from mlx_launcher.screens.hf_browse import HFBrowseScreen
-    from mlx_launcher.widgets.toggle_chip import ToggleChip
+    from omnicode.app import OmniCodeApp
+    from omnicode.screens.hf_browse import HFBrowseScreen
+    from omnicode.widgets.toggle_chip import ToggleChip
 
     monkeypatch.setattr(hf, "search_models", lambda *a, **k: [])  # never network
 
     async def go(allow_mlx, current_engine):
-        app = MlxLauncherApp()
+        app = OmniCodeApp()
         async with app.run_test(size=(140, 40)) as pilot:
             await pilot.pause(0.2)
             await app.push_screen(HFBrowseScreen(allow_mlx=allow_mlx, current_engine=current_engine))
@@ -264,8 +264,8 @@ def test_hf_browse_download_flow_marshals_progress_and_dismisses(tmp_path, monke
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     import asyncio
 
-    from mlx_launcher.app import MlxLauncherApp
-    from mlx_launcher.screens.hf_browse import HFBrowseScreen, HFResult
+    from omnicode.app import OmniCodeApp
+    from omnicode.screens.hf_browse import HFBrowseScreen, HFResult
 
     def fake_dl(repo, on_progress, allow_patterns=None, cancel=None, on_bytes=None):
         on_progress("fetching…")   # → self.app.call_from_thread(log.write, …) from a worker thread
@@ -280,7 +280,7 @@ def test_hf_browse_download_flow_marshals_progress_and_dismisses(tmp_path, monke
     result = {}
 
     async def go():
-        app = MlxLauncherApp()
+        app = OmniCodeApp()
         async with app.run_test(size=(140, 40)) as pilot:
             await pilot.pause(0.2)
             await app.push_screen(HFBrowseScreen(allow_mlx=True, current_engine="mlx-lm"),
@@ -303,11 +303,11 @@ def test_editor_mounts_search_hf_button(tmp_path, monkeypatch):
 
     from textual.widgets import Button
 
-    from mlx_launcher.app import MlxLauncherApp
-    from mlx_launcher.screens.editor import EditorScreen
+    from omnicode.app import OmniCodeApp
+    from omnicode.screens.editor import EditorScreen
 
     async def go():
-        app = MlxLauncherApp()
+        app = OmniCodeApp()
         async with app.run_test(size=(140, 40)) as pilot:
             await pilot.pause(0.2)
             await app.push_screen(EditorScreen())
@@ -327,9 +327,9 @@ def test_editor_model_field_suggests_downloaded_models(tmp_path, monkeypatch):
 
     from textual.widgets import OptionList, Select
 
-    from mlx_launcher.app import MlxLauncherApp
-    from mlx_launcher.screens.editor import EditorScreen
-    from mlx_launcher.widgets.path_input import PathInput
+    from omnicode.app import OmniCodeApp
+    from omnicode.screens.editor import EditorScreen
+    from omnicode.widgets.path_input import PathInput
 
     monkeypatch.setattr(hf, "cached_models", lambda: [
         hf.LocalModel("mlx-community/Recent-4bit", "mlx", 3_000_000_000, 200.0),  # newest → top
@@ -339,7 +339,7 @@ def test_editor_model_field_suggests_downloaded_models(tmp_path, monkeypatch):
     out = {}
 
     async def go():
-        app = MlxLauncherApp()
+        app = OmniCodeApp()
         async with app.run_test(size=(140, 40)) as pilot:
             await pilot.pause(0.2)
             await app.push_screen(EditorScreen())

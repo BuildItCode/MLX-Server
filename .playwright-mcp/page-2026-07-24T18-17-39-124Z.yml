@@ -1,0 +1,10 @@
+- generic [ref=e1]:
+  - heading "Playwright MCP probe" [level=1] [ref=e2]
+  - button "Click me" [active] [ref=e3]
+  - textbox "type here" [ref=e4]
+  - combobox [ref=e5]:
+    - option "Alpha" [selected]
+    - option "Beta"
+  - link "Jump link" [ref=e6] [cursor=pointer]:
+    - /url: "#anchor"
+  - generic [ref=e7]: clicked:2026-07-24T18:17:38.619Z

@@ -1,4 +1,4 @@
-"""Service-level tests for the HTTP+SSE backend (mlx_launcher.core.service).
+"""Service-level tests for the HTTP+SSE backend (omnicode.core.service).
 
 Drives the ASGI app in-process via httpx with a fake engine injected through ``engine_factory`` —
 no real model server. Covers auth, session creation, a streaming run (SSE content + finish +
@@ -9,10 +9,10 @@ import json
 
 import httpx
 
-from mlx_launcher.core.persistence import chats as chats_store
-from mlx_launcher.core.persistence import config as config_store
-from mlx_launcher.core.service import create_app
-from mlx_launcher.models import ServerConfig
+from omnicode.core.persistence import chats as chats_store
+from omnicode.core.persistence import config as config_store
+from omnicode.core.service import create_app
+from omnicode.models import ServerConfig
 
 
 def _client(app):
@@ -101,11 +101,11 @@ async def test_permission_request_round_trip_deny(tmp_path, monkeypatch):
     # a project whose working dir exists → the sandboxed fs tools (incl. mutating write_file) are offered
     work = tmp_path / "proj"
     work.mkdir()
-    from mlx_launcher.models import Project
+    from omnicode.models import Project
     proj = Project(name="p", working_dir=str(work))
     await chats_store.mutate(lambda f: chats_store.upsert_project(f, proj))
 
-    from mlx_launcher.core import events as ev
+    from omnicode.core import events as ev
     eng = FakeEngine(chat_responses=[_native_call("write_file", {"path": "a.py", "content": "x"}),
                                      _final("ok, I asked first")])
     app = create_app(engine_factory=lambda s: eng)
@@ -138,8 +138,8 @@ async def test_cancel_during_permission_prompt_unblocks_the_run(tmp_path, monkey
     await _seed_server()
     work = tmp_path / "proj"
     work.mkdir()
-    from mlx_launcher.core import events as ev
-    from mlx_launcher.models import Project
+    from omnicode.core import events as ev
+    from omnicode.models import Project
     proj = Project(name="p", working_dir=str(work))
     await chats_store.mutate(lambda f: chats_store.upsert_project(f, proj))
 
@@ -171,8 +171,8 @@ async def test_auto_mode_runs_mutating_tools_without_prompting(tmp_path, monkeyp
     await _seed_server()
     work = tmp_path / "proj"
     work.mkdir()
-    from mlx_launcher.core import events as ev
-    from mlx_launcher.models import Project
+    from omnicode.core import events as ev
+    from omnicode.models import Project
     proj = Project(name="p", working_dir=str(work))
     await chats_store.mutate(lambda f: chats_store.upsert_project(f, proj))
 
@@ -197,6 +197,9 @@ async def test_auto_mode_runs_mutating_tools_without_prompting(tmp_path, monkeyp
 
 async def test_server_lifecycle_endpoints(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    # hermetic: pretend the engine binary is never installed, regardless of the
+    # dev machine's PATH (a real llama-server/mlx_vlm binary may exist locally)
+    monkeypatch.setattr("omnicode.core.server.manager.discovery.find_server_binary", lambda engine: None)
     await _seed_server()
     app = create_app()
     async with _client(app) as c:

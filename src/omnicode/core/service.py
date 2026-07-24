@@ -153,7 +153,7 @@ def _append_assistant(file, chat_id: str, fin: ev.TurnFinished) -> None:
     chat = chats_store.get_chat(file, chat_id)
     if chat is not None:
         m = ChatMessage(role="assistant", text=fin.text, reasoning=fin.reasoning,
-                        n_tokens=fin.n_tool_calls or None, elapsed=fin.elapsed or None)
+                        elapsed=fin.elapsed or None)
         chat.messages.append(m)
         chat.updated = m.ts
 
@@ -250,7 +250,6 @@ async def _drive_run(app: Starlette, handle: RunHandle, chat: Chat) -> None:
             policy = RunPolicy(
                 max_iters=24 if root else 8,
                 max_tool_calls=None if root else 8,
-                native_tools=(chat.server_id or "") not in app.state.prompted_servers,
             )
             runner = AgentRunner(
                 engine, tools=tools, policy=policy, permission=permission,
@@ -265,8 +264,6 @@ async def _drive_run(app: Starlette, handle: RunHandle, chat: Chat) -> None:
                 await q.put(event)
                 if isinstance(event, ev.TurnFinished):
                     final = event
-            if runner.used_prompted:
-                app.state.prompted_servers.add(chat.server_id or "")
             if final is not None and final.reason != "cancelled":
                 await chats_store.mutate(lambda f: _append_assistant(f, handle.session_id, final))
     except Exception as exc:  # noqa: BLE001
@@ -594,6 +591,14 @@ async def _stop_all_managers(app: Starlette) -> None:
             pass
 
 
+async def _stop_all_runs(app: Starlette) -> None:
+    """On backend shutdown, cancel in-flight runs and deny pending permissions so
+    driver tasks and their AsyncExitStack resources are released cleanly."""
+    for handle in list(getattr(app.state, "runs", {}).values()):
+        handle.cancel.set()
+        _deny_pending_perms(handle)
+
+
 # --- app -----------------------------------------------------------------
 
 def create_app(*, token: Optional[str] = None, engine_factory=None, on_shutdown=None) -> Starlette:
@@ -648,6 +653,7 @@ def create_app(*, token: Optional[str] = None, engine_factory=None, on_shutdown=
     @asynccontextmanager
     async def lifespan(app: Starlette):
         yield
+        await _stop_all_runs(app)      # cancel in-flight runs so driver tasks/exit-stacks unwind
         await _stop_all_managers(app)  # don't orphan model servers on backend shutdown
         if on_shutdown is not None:
             try:
@@ -659,6 +665,5 @@ def create_app(*, token: Optional[str] = None, engine_factory=None, on_shutdown=
     app.state.token = token
     app.state.runs = {}
     app.state.managers = {}  # server_id -> ServerManager (the backend owns model-server subprocesses)
-    app.state.prompted_servers = set()
     app.state.engine_factory = engine_factory or (lambda s: s.engine())
     return app
